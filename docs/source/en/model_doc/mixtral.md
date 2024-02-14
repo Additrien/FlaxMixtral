@@ -161,3 +161,11 @@ Albert Jiang, Alexandre Sablayrolles, Arthur Mensch, Chris Bamford, Devendra Sin
 
 [[autodoc]] MixtralForSequenceClassification
     - forward
+
+## FlaxMixtralModel
+[[autodoc]] FlaxMixtralModel
+    - forward
+
+## FlaxMixtralModelForCausalLM
+[[autodoc]] FlaxMixtralModelForCausalLM
+    - forward

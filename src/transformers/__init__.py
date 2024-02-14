@@ -8857,6 +8857,11 @@ if TYPE_CHECKING:
             FlaxMistralModel,
             FlaxMistralPreTrainedModel,
         )
+        from .models.mixtral import (
+            FlaxMixtralForCausalLM,
+            FlaxMixtralModel,
+            FlaxMixtralPreTrainedModel,
+        )
         from .models.mt5 import (
             FlaxMT5EncoderModel,
             FlaxMT5ForConditionalGeneration,

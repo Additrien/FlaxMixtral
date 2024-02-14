@@ -241,6 +241,8 @@ OBJECTS_TO_IGNORE = [
     "FlaxMarianModel",
     "FlaxMistralForCausalLM",
     "FlaxMistralModel",
+    "FlaxMixtralForCausalLM",
+    "FlaxMixtralModel",
     "FlaxOPTForCausalLM",
     "FlaxPegasusForConditionalGeneration",
     "FlaxPegasusModel",

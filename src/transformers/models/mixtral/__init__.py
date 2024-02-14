@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from ...utils import (
     OptionalDependencyNotAvailable,
     _LazyModule,
+    is_flax_available,
     is_torch_available,
 )
 
@@ -39,6 +40,19 @@ else:
     ]
 
 
+try:
+    if not is_flax_available():
+        raise OptionalDependencyNotAvailable()
+except OptionalDependencyNotAvailable:
+    pass
+else:
+    _import_structure["modeling_flax_mixtral"] = [
+        "FlaxMixtralForCausalLM",
+        "FlaxMixtralModel",
+        "FlaxMixtralPreTrainedModel",
+    ]
+
+
 if TYPE_CHECKING:
     from .configuration_mixtral import MIXTRAL_PRETRAINED_CONFIG_ARCHIVE_MAP, MixtralConfig
 
@@ -55,6 +69,17 @@ if TYPE_CHECKING:
             MixtralPreTrainedModel,
         )
 
+    try:
+        if not is_flax_available():
+            raise OptionalDependencyNotAvailable()
+    except OptionalDependencyNotAvailable:
+        pass
+    else:
+        from .modeling_flax_mixtral import (
+            FlaxMixtralForCausalLM,
+            FlaxMixtralModel,
+            FlaxMixtralPreTrainedModel,
+        )
 
 else:
     import sys
