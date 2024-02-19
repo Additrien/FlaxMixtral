@@ -4690,6 +4690,14 @@ else:
             "FlaxMistralPreTrainedModel",
         ]
     )
+    _import_structure["models.mixtral"].extend(
+        [
+            "FlaxMixtralForCausalLM",
+            "FlaxMixtralModel",
+            "FlaxMixtralPreTrainedModel",
+        ]
+    )
+
     _import_structure["models.mt5"].extend(["FlaxMT5EncoderModel", "FlaxMT5ForConditionalGeneration", "FlaxMT5Model"])
     _import_structure["models.opt"].extend(
         [
