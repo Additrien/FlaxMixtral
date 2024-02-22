@@ -848,7 +848,7 @@ class MixtralSparseMoeBlock(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
         # router_logits: (batch * sequence_length, n_experts)
         router_logits = self.gate(hidden_states)
-
+        
         routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
         routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
@@ -866,7 +866,7 @@ class MixtralSparseMoeBlock(nn.Module):
         for expert_idx in range(self.num_experts):
             expert_layer = self.experts[expert_idx]
             idx, top_x = torch.where(expert_mask[expert_idx])
-
+            
             if top_x.shape[0] == 0:
                 continue
 
@@ -879,7 +879,7 @@ class MixtralSparseMoeBlock(nn.Module):
             # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
             current_state = hidden_states[None, top_x_list].reshape(-1, hidden_dim)
             current_hidden_states = expert_layer(current_state) * routing_weights[top_x_list, idx_list, None]
-
+            
             # However `index_add_` only support torch tensors for indexing so we'll use
             # the `top_x` tensor here.
             final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
@@ -931,9 +931,8 @@ class MixtralDecoderLayer(nn.Module):
         """
 
         residual = hidden_states
-
         hidden_states = self.input_layernorm(hidden_states)
-
+        
         # Self Attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
@@ -943,6 +942,7 @@ class MixtralDecoderLayer(nn.Module):
             output_attentions=output_attentions,
             use_cache=use_cache,
         )
+        
         hidden_states = residual + hidden_states
 
         # Fully Connected
@@ -950,7 +950,6 @@ class MixtralDecoderLayer(nn.Module):
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states, router_logits = self.block_sparse_moe(hidden_states)
         hidden_states = residual + hidden_states
-
         outputs = (hidden_states,)
 
         if output_attentions:
@@ -1206,7 +1205,7 @@ class MixtralModel(MixtralPreTrainedModel):
             )
 
         hidden_states = inputs_embeds
-
+        
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
@@ -1251,7 +1250,7 @@ class MixtralModel(MixtralPreTrainedModel):
                 all_router_logits += (layer_outputs[-1],)
 
         hidden_states = self.norm(hidden_states)
-
+        
         # add hidden states from the last decoder layer
         if output_hidden_states:
             all_hidden_states += (hidden_states,)

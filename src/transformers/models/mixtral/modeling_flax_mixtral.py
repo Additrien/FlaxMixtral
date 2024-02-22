@@ -31,7 +31,11 @@ from flax.linen.attention import dot_product_attention_weights
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import lax
 
-from ...modeling_flax_outputs import FlaxBaseModelOutput, FlaxCausalLMOutput
+from ...modeling_flax_outputs import (
+    MoeCausalLMOutputWithPast,
+    MoeModelOutputWithPast,
+    SequenceClassifierOutputWithPast,
+)
 from ...modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring
 from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging
 from .configuration_mixtral import MixtralConfig
@@ -413,7 +417,7 @@ class FlaxMixtralBLockSparseTop2MLP(nn.Module):
         return(current_hidden_states)
 
 
-class FlaxMixtralBlocKSparesTop2MLPCollection(nn.Module):
+class FlaxMixtralBlockSparesTop2MLPCollection(nn.Module):
     config: MixtralConfig
     dtype: jnp.dtype = jnp.float32
 
@@ -446,15 +450,15 @@ class FlaxMixtralBlocKSparesTop2MLPCollection(nn.Module):
 
             if top_x.shape[0] == 0:
                 continue
-
-            def expert(layer, final_hidden_states):
+            
+            def expert(layer, input_hidden_states):
                 current_state = hidden_states[top_x]
                 current_hidden_states = layer.experts[expert_idx](current_state) * routing_weights[top_x, idx, None]
 
-                final_hidden_states = final_hidden_states.at[top_x].set(
-                    current_hidden_states + final_hidden_states[top_x]
+                input_hidden_states = input_hidden_states.at[top_x].set(
+                    current_hidden_states + input_hidden_states[top_x]
                 )
-                return final_hidden_states
+                return input_hidden_states
 
             final_hidden_states = expert(self, final_hidden_states)
 
@@ -480,7 +484,7 @@ class FlaxMixtralSparseMoeBlock(nn.Module):
 
     def setup(self) -> None:
         self.gate = nn.Dense(self.config.num_local_experts, use_bias=False, dtype=self.dtype)
-        self.experts = FlaxMixtralBlocKSparesTop2MLPCollection(config=self.config, dtype=self.dtype)
+        self.experts = FlaxMixtralBlockSparesTop2MLPCollection(config=self.config, dtype=self.dtype)
 
     def __call__(
             self,
@@ -490,7 +494,6 @@ class FlaxMixtralSparseMoeBlock(nn.Module):
         hidden_states = hidden_states.reshape(-1, hidden_dim)
         # router_logits: (batch * sequence_length, n_experts)
         router_logits = self.gate(hidden_states)
-
         routing_weights = jax.nn.softmax(router_logits, axis=1)
 
         routing_weights, selected_experts = jax.lax.top_k(routing_weights, self.config.num_experts_per_tok)
@@ -538,6 +541,7 @@ class FlaxMixtralDecoderLayer(nn.Module):
     ):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
+        
         outputs = self.self_attn(
             hidden_states,
             attention_mask=attention_mask,
@@ -771,7 +775,7 @@ class FlaxMixtralModule(nn.Module):
         return_dict: bool = True,
     ):
         input_embeds = self.embed_tokens(input_ids.astype("i4"))
-        
+                
         outputs = self.layers(
             input_embeds,
             position_ids=position_ids,
@@ -784,7 +788,16 @@ class FlaxMixtralModule(nn.Module):
         )
         
         hidden_states = outputs[0]
-        
+
+        if use_cache:
+            next_decoder_cache = layer_outputs[2 if output_attentions else 1]
+
+        if output_attentions:
+            all_self_attns += (layer_outputs[1],)
+
+        if output_router_logits:
+            all_router_logits += (layer_outputs[-1],)
+
         hidden_states = self.norm(hidden_states)
 
         if output_hidden_states:
@@ -795,12 +808,18 @@ class FlaxMixtralModule(nn.Module):
         if not return_dict:
             return tuple(v for v in outputs if v is not None)
 
-        return FlaxBaseModelOutput(
+        return FlaxMoeModelOutputWithPast(
             last_hidden_state=hidden_states,
-            hidden_states=outputs[1],
+            past_key_values=next_cache,
+            hidden_states=all_hidden_states,
             attentions=outputs[-1],
         )
 
+            last_hidden_state=hidden_states,
+            
+            hidden_states=all_hidden_states,
+            attentions=all_self_attns,
+            router_logits=all_router_logits,
 
 @add_start_docstrings(
     "The bare Mixtral Model transformer outputting raw hidden-states without any specific head on top.",
