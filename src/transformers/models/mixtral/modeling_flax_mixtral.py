@@ -32,9 +32,10 @@ from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import lax
 
 from ...modeling_flax_outputs import (
-    MoeCausalLMOutputWithPast,
-    MoeModelOutputWithPast,
-    SequenceClassifierOutputWithPast,
+    FlaxMoeCausalLMOutputWithPast,
+    FlaxMoeModelOutputWithPast,
+    FlaxSequenceClassifierOutputWithPast,
+    FlaxCausalLMOutput
 )
 from ...modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring
 from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging
@@ -719,10 +720,12 @@ class FlaxMixtralLayerCollection(nn.Module):
         init_cache: bool = False,
         output_attentions: bool = False,
         output_hidden_states: bool = False,
+        output_router_logits: bool = False,
         return_dict: bool = False,
     ):
         all_attentions = () if output_attentions else None
         all_hidden_states = () if output_hidden_states else None
+        all_router_logits = () if output_router_logits else None
 
         for block in self.blocks:
             if output_hidden_states:
@@ -740,13 +743,15 @@ class FlaxMixtralLayerCollection(nn.Module):
             if output_attentions:
                 all_attentions += (layer_outputs[1],)
 
+            if output_router_logits:
+                all_router_logits += (layer_outputs[-1],)
+
         # this contains possible `None` values - `FlaxMixtralModule` will filter them out
-        outputs = (hidden_states, all_hidden_states, all_attentions)
+        outputs = (hidden_states, all_hidden_states, all_attentions, all_router_logits)
 
         return outputs
 
 
-# Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaModule with Llama->Mixtral
 class FlaxMixtralModule(nn.Module):
     config: MixtralConfig
     dtype: jnp.dtype = jnp.float32
@@ -772,8 +777,14 @@ class FlaxMixtralModule(nn.Module):
         init_cache: bool = False,
         output_attentions: bool = False,
         output_hidden_states: bool = False,
+        output_router_logits: bool = False,
         return_dict: bool = True,
     ):
+        
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attns = () if output_attentions else None
+        all_router_logits = () if output_router_logits else None
+
         input_embeds = self.embed_tokens(input_ids.astype("i4"))
                 
         outputs = self.layers(
@@ -783,43 +794,38 @@ class FlaxMixtralModule(nn.Module):
             deterministic=deterministic,
             init_cache=init_cache,
             output_attentions=output_attentions,
+            output_router_logits=output_router_logits,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
         
         hidden_states = outputs[0]
 
-        if use_cache:
-            next_decoder_cache = layer_outputs[2 if output_attentions else 1]
-
         if output_attentions:
-            all_self_attns += (layer_outputs[1],)
+            all_self_attns += (outputs[1],)
 
         if output_router_logits:
-            all_router_logits += (layer_outputs[-1],)
+            all_router_logits += (outputs[-1],)
 
         hidden_states = self.norm(hidden_states)
 
         if output_hidden_states:
             all_hidden_states = outputs[1] + (hidden_states,)
-            outputs = (hidden_states, all_hidden_states) + outputs[2:]
-        else:
-            outputs = (hidden_states,) + outputs[1:]
+
         if not return_dict:
-            return tuple(v for v in outputs if v is not None)
+            return tuple(
+                v
+                for v in [hidden_states, all_hidden_states, all_self_attns, all_router_logits]
+                if v is not None
+            )
 
         return FlaxMoeModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=next_cache,
-            hidden_states=all_hidden_states,
-            attentions=outputs[-1],
-        )
-
-            last_hidden_state=hidden_states,
-            
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
             router_logits=all_router_logits,
+        )
+
 
 @add_start_docstrings(
     "The bare Mixtral Model transformer outputting raw hidden-states without any specific head on top.",
@@ -833,7 +839,7 @@ class FlaxMixtralModel(FlaxMixtralPreTrainedModel):
 append_call_sample_docstring(
     FlaxMixtralModel,
     _CHECKPOINT_FOR_DOC,
-    FlaxBaseModelOutput,
+    FlaxMoeModelOutputWithPast,
     _CONFIG_FOR_DOC,
     real_checkpoint=_REAL_CHECKPOINT_FOR_DOC,
 )
