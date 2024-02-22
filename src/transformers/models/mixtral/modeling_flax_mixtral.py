@@ -246,7 +246,8 @@ class FlaxMixtralRotaryEmbedding(nn.Module):
 
     def setup(self):
         head_dim = self.config.hidden_size // self.config.num_attention_heads
-        self.sincos = create_sinusoidal_positions(self.config.max_position_embeddings, head_dim)
+        # self.sincos = create_sinusoidal_positions(self.config.max_position_embeddings, head_dim)
+        self.sincos = create_sinusoidal_positions(4096, head_dim)
 
     def __call__(self, key, query, position_ids):
         sincos = self.sincos[position_ids]
@@ -273,7 +274,8 @@ class FlaxMixtralAttention(nn.Module):
         self.head_dim = self.hidden_size // self.num_heads
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        self.max_position_embeddings = config.max_position_embeddings
+        # self.max_position_embeddings = config.max_position_embeddings
+        self.max_position_embeddings = 4096
         self.attention_softmax_in_fp32 = self.dtype is not jnp.float32
         self.rope_theta = config.rope_theta
         if (self.head_dim * self.num_heads) != self.hidden_size:
@@ -285,7 +287,8 @@ class FlaxMixtralAttention(nn.Module):
         self.k_proj = nn.Dense(self.num_key_value_heads * self.head_dim, use_bias=False, dtype=self.dtype)
         self.v_proj = nn.Dense(self.num_key_value_heads * self.head_dim, use_bias=False, dtype=self.dtype)
         self.o_proj = nn.Dense(self.hidden_size, use_bias=False, dtype=self.dtype)
-        casual_mask = make_causal_mask(jnp.ones((1, config.max_position_embeddings), dtype="bool"), dtype="bool")
+        # casual_mask = make_causal_mask(jnp.ones((1, config.max_position_embeddings), dtype="bool"), dtype="bool")
+        casual_mask = make_causal_mask(jnp.ones((1, 4096), dtype="bool"), dtype="bool")
         self.causal_mask = jnp.triu(casual_mask, k=-config.sliding_window)
         self.rotary_emb = FlaxMixtralRotaryEmbedding(config, dtype=self.dtype)
 
@@ -355,7 +358,6 @@ class FlaxMixtralAttention(nn.Module):
             )
         else:
             causal_mask = self.causal_mask[:, :, :query_length, :key_length]
-
         batch_size = hidden_states.shape[0]
         causal_mask = jnp.broadcast_to(causal_mask, (batch_size,) + causal_mask.shape[1:])
         attention_mask = jnp.broadcast_to(jnp.expand_dims(attention_mask, axis=(-3, -2)), causal_mask.shape)
@@ -373,7 +375,6 @@ class FlaxMixtralAttention(nn.Module):
             jnp.full(attention_mask.shape, 0.0).astype(self.dtype),
             jnp.full(attention_mask.shape, jnp.finfo(self.dtype).min).astype(self.dtype),
         )
-
         # usual dot product attention
         attention_dtype = jnp.float32 if self.attention_softmax_in_fp32 else self.dtype
         attn_weights = dot_product_attention_weights(
@@ -391,7 +392,6 @@ class FlaxMixtralAttention(nn.Module):
         attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value_states)
         attn_output = self._merge_heads(attn_output)
         attn_output = self.o_proj(attn_output)
-
         outputs = (attn_output, attn_weights) if output_attentions else (attn_output,)
         return outputs
 
@@ -404,14 +404,82 @@ class FlaxMixtralBlockSparseTop2MLP(nn.Module):
         self.w1 = nn.Dense(self.config.intermediate_size, use_bias=False, dtype=self.dtype)
         self.w2 = nn.Dense(self.config.hidden_size, use_bias=False, dtype=self.dtype)
         self.w3 = nn.Dense(self.config.intermediate_size, use_bias=False, dtype=self.dtype)
-    
         self.act_fn = ACT2FN[self.config.hidden_act]
 
-    def call(self, hidden_states):
+    # @nn.compact
+    def __call__(self, hidden_states):
+
+        # self.w1 = nn.Dense(self.config.intermediate_size, use_bias=False, dtype=self.dtype, name=str("layer1_"+self.i))
+        # self.w2 = nn.Dense(self.config.hidden_size, use_bias=False, dtype=self.dtype, name=str("layer2_"+self.i))
+        # self.w3 = nn.Dense(self.config.intermediate_size, use_bias=False, dtype=self.dtype, name=str("layer3_"+self.i))
+        # self.act_fn = ACT2FN[self.config.hidden_act]
+
         current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
         current_hidden_states = self.w2(current_hidden_states)
         return current_hidden_states
 
+
+class FlaxMixtralBlockSparseTop2MLPCollection(nn.Module):
+    config: MixtralConfig
+    dtype: jnp.dtype = jnp.float32
+
+    # def setup(self):
+    #     self.experts = [
+    #         FlaxMixtralBlockSparseTop2MLP(self.config, dtype=self.dtype, name=str(i))
+    #         for i in range(self.config.num_local_experts)
+    #     ]
+
+    @nn.compact
+    def __call__(
+            self, 
+            hidden_states, 
+            expert_mask, 
+            routing_weights, 
+            batch_size,
+            sequence_length,
+            hidden_dim
+        ):
+        print("HHDBDBWEHJDBEKFNs")
+        experts = [
+            FlaxMixtralBlockSparseTop2MLP(self.config, dtype=self.dtype)
+            for _ in range(self.config.num_local_experts)
+        ]
+       
+        final_hidden_states = jnp.zeros(
+            (batch_size * sequence_length, hidden_dim), dtype=hidden_states.dtype
+        )
+
+        # Loop over all available experts in the model and perform the computation on each expert
+        for expert_idx in range(self.config.num_local_experts):
+            # expert_layer = self.experts[expert_idx]
+            idx, top_x = jnp.where(expert_mask[expert_idx])
+
+            if top_x.shape[0] == 0:
+                continue
+
+            # in torch it is faster to index using lists than torch tensors
+            top_x_list = top_x.tolist()
+            top_x_list = jnp.array(top_x_list)
+            idx_list = idx.tolist()
+
+            def expert_layers(layers, final_hidden_states):
+                # Index the correct hidden states and compute the expert hidden state for
+                # the current expert. We need to make sure to multiply the output hidden
+                # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
+                current_state = jnp.expand_dims(final_hidden_states[top_x_list], axis=0)
+                current_state = current_state.reshape(-1, hidden_dim)
+                current_hidden_states = layers.experts[expert_idx](current_state) * routing_weights[top_x_list, idx_list, None]
+
+                # However `index_add_` only support torch tensors for indexing so we'll use
+                # the `top_x` tensor here.
+                current_hidden_states = current_hidden_states.astype(final_hidden_states.dtype)
+                final_hidden_states = final_hidden_states.at[top_x].add(current_hidden_states)
+
+            final_hidden_states = expert_layers(experts, final_hidden_states)
+
+        final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+        return final_hidden_states
+        
 
 class FlaxMixtralSparseMoeBlock(nn.Module):
     """
@@ -431,57 +499,112 @@ class FlaxMixtralSparseMoeBlock(nn.Module):
     def setup(self):
         #gating
         self.gate = nn.Dense(self.config.num_local_experts, use_bias=False, dtype=self.dtype)
+        self.experts = FlaxMixtralBlockSparseTop2MLPCollection(self.config, dtype=self.dtype)
 
-        self.experts = [
-            FlaxMixtralBlockSparseTop2MLP(self.config, dtype=self.dtype)
-            for _ in range(self.config.num_local_experts)
-        ]
+    def __call__(self, hidden_states):
 
-    def call(self, hidden_states):
-        """ """
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.reshape(-1, hidden_dim)
         # router_logits: (batch * sequence_length, n_experts)
         router_logits = self.gate(hidden_states)
 
         routing_weights = nn.activation.softmax(router_logits, axis=1)
-        routing_weights, selected_experts = jax.lax.topk(routing_weights, self.config.num_experts_per_tok)
+        routing_weights, selected_experts = jax.lax.top_k(routing_weights, self.config.num_experts_per_tok)
         routing_weights /= jnp.sum(routing_weights, axis=-1, keepdims=True)
         # we cast back to the input dtype
         routing_weights = routing_weights.astype(hidden_states.dtype)
 
-        final_hidden_states = jnp.zeros(
-            (batch_size * sequence_length, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
-        )
-
         # One hot encode the selected experts to create an expert mask
         # this will be used to easily index which expert is going to be sollicitated
-        expert_mask = nn.activation.one_hot(selected_experts, num_classes=self.config.num_experts_per_tok).transpose((2, 0, 1))
+        expert_mask = nn.activation.one_hot(selected_experts, num_classes=self.config.num_experts_per_tok).transpose((2, 1, 0))
 
-        # Loop over all available experts in the model and perform the computation on each expert
-        for expert_idx in range(self.config.num_experts_per_tok):
-            expert_layer = self.experts[expert_idx]
-            idx, top_x = jnp.where(expert_mask[expert_idx])
+        # self.experts.setup()
+        final_hidden_states = self.experts(
+            hidden_states, 
+            expert_mask, 
+            routing_weights, 
+            batch_size,
+            sequence_length,
+            hidden_dim
+        )
 
-            if top_x.shape[0] == 0:
-                continue
-
-            # in torch it is faster to index using lists than torch tensors
-            top_x_list = top_x.tolist()
-            idx_list = idx.tolist()
-
-            # Index the correct hidden states and compute the expert hidden state for
-            # the current expert. We need to make sure to multiply the output hidden
-            # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
-            current_state = hidden_states[None, top_x_list].transpose((-1, hidden_dim))
-            current_hidden_states = expert_layer(current_state) * routing_weights[top_x_list, idx_list, None]
-
-            # However `index_add_` only support torch tensors for indexing so we'll use
-            # the `top_x` tensor here.
-            current_hidden_states = current_hidden_states.astype(hidden_states.dtype)
-            final_hidden_states = final_hidden_states.at[top_x].add(current_hidden_states)
-        final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
         return final_hidden_states, router_logits
+
+
+# class FlaxMixtralSparseMoeBlock(nn.Module):
+#     """
+#     This implementation is
+#     strictly equivalent to standard MoE with full capacity (no
+#     dropped tokens). It's faster since it formulates MoE operations
+#     in terms of block-sparse operations to accomodate imbalanced
+#     assignments of tokens to experts, whereas standard MoE either
+#     (1) drop tokens at the cost of reduced performance or (2) set
+#     capacity factor to number of experts and thus waste computation
+#     and memory on padding.
+#     """
+
+#     config : MixtralConfig
+#     dtype : jnp.dtype = jnp.float32
+
+#     def setup(self):
+#         #gating
+#         self.gate = nn.Dense(self.config.num_local_experts, use_bias=False, dtype=self.dtype)
+
+#         self.experts = [
+#             FlaxMixtralBlockSparseTop2MLP(self.config, dtype=self.dtype, name=str(i))
+#             for i in range(self.config.num_local_experts)
+#         ]
+
+#     def __call__(self, hidden_states):
+#         batch_size, sequence_length, hidden_dim = hidden_states.shape
+#         hidden_states = hidden_states.reshape(-1, hidden_dim)
+#         # router_logits: (batch * sequence_length, n_experts)
+#         router_logits = self.gate(hidden_states)
+
+#         routing_weights = nn.activation.softmax(router_logits, axis=1)
+#         routing_weights, selected_experts = jax.lax.top_k(routing_weights, self.config.num_experts_per_tok)
+#         routing_weights /= jnp.sum(routing_weights, axis=-1, keepdims=True)
+#         # we cast back to the input dtype
+#         routing_weights = routing_weights.astype(hidden_states.dtype)
+#         final_hidden_states = jnp.zeros(
+#             (batch_size * sequence_length, hidden_dim), dtype=hidden_states.dtype
+#         )
+
+#         # One hot encode the selected experts to create an expert mask
+#         # this will be used to easily index which expert is going to be sollicitated
+#         expert_mask = nn.activation.one_hot(selected_experts, num_classes=self.config.num_experts_per_tok).transpose((2, 1, 0))
+        
+#         # Loop over all available experts in the model and perform the computation on each expert
+#         for expert_idx in range(self.config.num_experts_per_tok):
+#             print(expert_idx)
+#             expert_layer = self.experts[expert_idx]
+#             idx, top_x = jnp.where(expert_mask[expert_idx])
+
+#             if top_x.shape[0] == 0:
+#                 continue
+
+#             # in torch it is faster to index using lists than torch tensors
+#             top_x_list = top_x.tolist()
+#             top_x_list = jnp.array(top_x_list)
+#             idx_list = idx.tolist()
+
+#             # Index the correct hidden states and compute the expert hidden state for
+#             # the current expert. We need to make sure to multiply the output hidden
+#             # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
+#             print("hidden_states 656565: ", hidden_states.shape)
+#             current_state = jnp.expand_dims(hidden_states[top_x_list], axis=0)
+#             current_state = current_state.reshape(-1, hidden_dim)
+#             print("current_state: ", current_state.shape)
+#             current_hidden_states = expert_layer(current_state)
+#             print("ppppppppppppppppp")
+#             current_hidden_states = current_hidden_states * routing_weights[top_x_list, idx_list, None]
+
+#             # However `index_add_` only support torch tensors for indexing so we'll use
+#             # the `top_x` tensor here.
+#             current_hidden_states = current_hidden_states.astype(hidden_states.dtype)
+#             final_hidden_states = final_hidden_states.at[top_x].add(current_hidden_states)
+#         final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+#         return final_hidden_states, router_logits
 
 
 # Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaDecoderLayer with Llama->Mixtral
@@ -637,7 +760,7 @@ class FlaxMixtralPreTrainedModel(FlaxPreTrainedModel):
             mutable = ["cache"]
         else:
             mutable = False
-
+        
         outputs = self.module.apply(
             inputs,
             jnp.array(input_ids, dtype="i4"),
@@ -740,7 +863,7 @@ class FlaxMixtralModule(nn.Module):
         return_dict: bool = True,
     ):
         input_embeds = self.embed_tokens(input_ids.astype("i4"))
-
+        
         outputs = self.layers(
             input_embeds,
             position_ids=position_ids,
@@ -751,8 +874,9 @@ class FlaxMixtralModule(nn.Module):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-
+        
         hidden_states = outputs[0]
+        
         hidden_states = self.norm(hidden_states)
 
         if output_hidden_states:
@@ -760,7 +884,6 @@ class FlaxMixtralModule(nn.Module):
             outputs = (hidden_states, all_hidden_states) + outputs[2:]
         else:
             outputs = (hidden_states,) + outputs[1:]
-
         if not return_dict:
             return tuple(v for v in outputs if v is not None)
 

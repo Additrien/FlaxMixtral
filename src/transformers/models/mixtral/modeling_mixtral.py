@@ -803,6 +803,7 @@ class MixtralBlockSparseTop2MLP(nn.Module):
         self.w3 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)
 
         self.act_fn = ACT2FN[config.hidden_act]
+        print(self.act_fn)
 
     def forward(self, hidden_states):
         current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
@@ -851,6 +852,7 @@ class MixtralSparseMoeBlock(nn.Module):
 
         routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
         routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
+        print(selected_experts.shape)
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
         # we cast back to the input dtype
         routing_weights = routing_weights.to(hidden_states.dtype)
@@ -862,7 +864,6 @@ class MixtralSparseMoeBlock(nn.Module):
         # One hot encode the selected experts to create an expert mask
         # this will be used to easily index which expert is going to be sollicitated
         expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
-
         # Loop over all available experts in the model and perform the computation on each expert
         for expert_idx in range(self.num_experts):
             expert_layer = self.experts[expert_idx]
@@ -874,11 +875,13 @@ class MixtralSparseMoeBlock(nn.Module):
             # in torch it is faster to index using lists than torch tensors
             top_x_list = top_x.tolist()
             idx_list = idx.tolist()
-
+            
             # Index the correct hidden states and compute the expert hidden state for
             # the current expert. We need to make sure to multiply the output hidden
             # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
+            print("hidden_states: ", hidden_states.shape)
             current_state = hidden_states[None, top_x_list].reshape(-1, hidden_dim)
+            print("current_state: ", current_state.shape)
             current_hidden_states = expert_layer(current_state) * routing_weights[top_x_list, idx_list, None]
 
             # However `index_add_` only support torch tensors for indexing so we'll use
