@@ -441,30 +441,22 @@ class FlaxMixtralBlocKSparesTop2MLPCollection(nn.Module):
         )
 
         for expert_idx in range(self.config.num_local_experts):
-            expert_layer = self.experts[expert_idx]
             selected_mask = expert_mask[expert_idx]
             idx, top_x = jnp.nonzero(selected_mask, size=sequence_length, fill_value=-1)
 
             if top_x.shape[0] == 0:
                 continue
-            
-            current_state = hidden_states[top_x]
-            current_hidden_states = expert_layer[expert_idx](current_state) * routing_weights[top_x, idx, None]
 
-            final_hidden_states = final_hidden_states.at[top_x].set(
-                current_hidden_states + final_hidden_states[top_x]
-            )
+            def expert(layer, final_hidden_states):
+                current_state = hidden_states[top_x]
+                current_hidden_states = layer.experts[expert_idx](current_state) * routing_weights[top_x, idx, None]
 
-            # def expert(layer, final_hidden_states):
-            #     current_state = hidden_states[top_x]
-            #     current_hidden_states = layer.experts[expert_idx](current_state) * routing_weights[top_x, idx, None]
+                final_hidden_states = final_hidden_states.at[top_x].set(
+                    current_hidden_states + final_hidden_states[top_x]
+                )
+                return final_hidden_states
 
-            #     final_hidden_states = final_hidden_states.at[top_x].set(
-            #         current_hidden_states + final_hidden_states[top_x]
-            #     )
-            #     return final_hidden_states
-
-            # final_hidden_states = expert(self, final_hidden_states)
+            final_hidden_states = expert(self, final_hidden_states)
 
         final_hidden_states = final_hidden_states[:-1]
         final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
