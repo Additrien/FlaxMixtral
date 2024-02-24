@@ -18,7 +18,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Flax Mixtral model."""
-from functools import partial
 from typing import Optional, Tuple
 
 import flax.linen as nn
@@ -251,8 +250,7 @@ class FlaxMixtralRotaryEmbedding(nn.Module):
 
     def setup(self):
         head_dim = self.config.hidden_size // self.config.num_attention_heads
-        # self.sincos = create_sinusoidal_positions(self.config.max_position_embeddings, head_dim)
-        self.sincos = create_sinusoidal_positions(4096, head_dim)
+        self.sincos = create_sinusoidal_positions(self.config.max_position_embeddings, head_dim)
 
     def __call__(self, key, query, position_ids):
         sincos = self.sincos[position_ids]
@@ -411,7 +409,7 @@ class FlaxMixtralBLockSparseTop2MLP(nn.Module):
         self.w3 = nn.Dense(self.config.intermediate_size, use_bias=False, dtype=self.dtype)
         self.act_fn = ACT2FN[self.config.hidden_act]
 
-    def __call__(self, hidden_states):
+    def __call__(self, hidden_states: jnp.ndarray):
         current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
         current_hidden_states = self.w2(current_hidden_states)
 
@@ -519,7 +517,6 @@ class FlaxMixtralSparseMoeBlock(nn.Module):
         return final_hidden_states, router_logits
 
 
-# Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaDecoderLayer with Llama->Mixtral
 class FlaxMixtralDecoderLayer(nn.Module):
     config: MixtralConfig
     dtype: jnp.dtype = jnp.float32
@@ -560,7 +557,7 @@ class FlaxMixtralDecoderLayer(nn.Module):
         hidden_states, router_logits = self.block_sparse_moe(hidden_states)
         # residual connection
         hidden_states = residual + hidden_states
-
+        print("Layer: ", output_router_logits)
         if output_router_logits:
             return (hidden_states,) + outputs[1:] + (router_logits,)
         else:
@@ -700,7 +697,6 @@ class FlaxMixtralPreTrainedModel(FlaxPreTrainedModel):
         return outputs
 
 
-# Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaLayerCollection with Llama->Mixtral
 class FlaxMixtralLayerCollection(nn.Module):
     config: MixtralConfig
     dtype: jnp.dtype = jnp.float32
@@ -774,17 +770,16 @@ class FlaxMixtralModule(nn.Module):
         attention_mask=None,
         position_ids=None,
         deterministic=True,
-        init_cache: bool = False,
-        output_attentions: bool = False,
-        output_hidden_states: bool = False,
-        output_router_logits: bool = False,
-        return_dict: bool = True,
+        init_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        output_router_logits: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
     ):
         
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         all_router_logits = () if output_router_logits else None
-
         input_embeds = self.embed_tokens(input_ids.astype("i4"))
                 
         outputs = self.layers(
@@ -864,12 +859,13 @@ class FlaxMixtralForCausalLMModule(nn.Module):
         attention_mask=None,
         position_ids=None,
         deterministic: bool = True,
-        init_cache: bool = False,
-        output_attentions: bool = False,
-        output_hidden_states: bool = False,
-        output_router_logits: bool = False,
-        return_dict: bool = True,
+        init_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        output_router_logits: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
     ):
+        print("output_router_logits: ", output_router_logits)
         outputs = self.model(
             input_ids,
             position_ids=position_ids,
@@ -878,9 +874,9 @@ class FlaxMixtralForCausalLMModule(nn.Module):
             init_cache=init_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
+            output_router_logits=output_router_logits,
             return_dict=return_dict,
         )
-
         hidden_states = outputs[0]
         lm_logits = self.lm_head(hidden_states)
 
@@ -899,8 +895,15 @@ class FlaxMixtralForCausalLMModule(nn.Module):
                 output = (aux_loss,) + output
             return output
 
-        return FlaxCausalLMOutput(logits=lm_logits, hidden_states=outputs.hidden_states, attentions=outputs.attentions)
-
+        print("#######################CausalLM####################### ", output_router_logits)
+        # return FlaxCausalLMOutput(logits=lm_logits, hidden_states=outputs.hidden_states, attentions=outputs.attentions)
+        FlaxMoeCausalLMOutputWithPast(
+            aux_loss=aux_loss,
+            logits=lm_logits,
+            hidden_states=hidden_states,
+            attentions=outputs.attentions,
+            router_logits=outputs.router_logits,
+        )
 
 @add_start_docstrings(
     """

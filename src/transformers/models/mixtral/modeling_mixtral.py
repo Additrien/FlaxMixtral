@@ -929,7 +929,6 @@ class MixtralDecoderLayer(nn.Module):
                 If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
                 (see `past_key_values`).
         """
-
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         
@@ -1265,6 +1264,7 @@ class MixtralModel(MixtralPreTrainedModel):
                 for v in [hidden_states, next_cache, all_hidden_states, all_self_attns, all_router_logits]
                 if v is not None
             )
+
         return MoeModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
@@ -1348,7 +1348,7 @@ class MixtralForCausalLM(MixtralPreTrainedModel):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
-
+        print("CausalLM: 1111", output_router_logits)
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_router_logits = (
             output_router_logits if output_router_logits is not None else self.config.output_router_logits
