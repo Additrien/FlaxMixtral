@@ -32,9 +32,7 @@ from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import lax
 
 from ...modeling_flax_outputs import (
-    FlaxMoeCausalLMOutputWithPast,
     FlaxMoeModelOutputWithPast,
-    FlaxSequenceClassifierOutputWithPast,
     FlaxCausalLMOutput
 )
 from ...modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring
