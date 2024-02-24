@@ -821,56 +821,6 @@ class FlaxSeq2SeqQuestionAnsweringModelOutput(ModelOutput):
     encoder_last_hidden_state: Optional[jnp.ndarray] = None
     encoder_hidden_states: Optional[Tuple[jnp.ndarray]] = None
     encoder_attentions: Optional[Tuple[jnp.ndarray]] = None
-<<<<<<< HEAD
-
-
-@flax.struct.dataclass
-class FlaxMoeCausalLMOutputWithPast(ModelOutput):
-    """
-    Base class for causal language model (or autoregressive) with mixture of experts outputs.
-
-    Args:
-        loss (`jnp.ndarray` of shape `(1,)`, *optional*, returned when `labels` is provided):
-            Language modeling loss (for next-token prediction).
-
-        logits (`jnp.ndarray` of shape `(batch_size, sequence_length, config.vocab_size)`):
-            Prediction scores of the language modeling head (scores for each vocabulary token before SoftMax).
-
-        aux_loss (`jnp.ndarray`, *optional*, returned when `labels` is provided):
-            aux_loss for the sparse modules.
-
-        router_logits (`tuple(jnp.ndarray)`, *optional*, returned when `output_router_probs=True` and `config.add_router_probs=True` is passed or when `config.output_router_probs=True`):
-            Tuple of `jnp.ndarray` (one for each layer) of shape `(batch_size, sequence_length, num_experts)`.
-
-            Raw router logtis (post-softmax) that are computed by MoE routers, these terms are used to compute the auxiliary
-            loss for Mixture of Experts models.
-
-        past_key_values (`tuple(tuple(jnp.ndarray))`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
-            Tuple of `tuple(jnp.ndarray)` of length `config.n_layers`, with each tuple having 2 tensors of shape
-            `(batch_size, num_heads, sequence_length, embed_size_per_head)`)
-
-            Contains pre-computed hidden-states (key and values in the self-attention blocks) that can be used (see
-            `past_key_values` input) to speed up sequential decoding.
-        hidden_states (`tuple(jnp.ndarray)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-            Tuple of `jnp.ndarray` (one for the output of the embeddings, if the model has an embedding layer, +
-            one for the output of each layer) of shape `(batch_size, sequence_length, hidden_size)`.
-
-            Hidden-states of the model at the output of each layer plus the optional initial embedding outputs.
-        attentions (`tuple(jnp.ndarray)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
-            Tuple of `jnp.ndarray` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
-            sequence_length)`.
-
-            Attentions weights after the attention softmax, used to compute the weighted average in the self-attention
-            heads.
-    """
-
-    loss: Optional[jnp.ndarray] = None
-    aux_loss: Optional[jnp.ndarray] = None
-    logits: jnp.ndarray = None
-    past_key_values: Optional[Tuple[Tuple[jnp.ndarray]]] = None
-    hidden_states: Optional[Tuple[jnp.ndarray, ...]] = None
-    attentions: Optional[Tuple[jnp.ndarray, ...]] = None
-    router_logits: Optional[Tuple[jnp.ndarray]] = None
 
 
 @flax.struct.dataclass
@@ -907,5 +857,3 @@ class FlaxSequenceClassifierOutputWithPast(ModelOutput):
     past_key_values: Optional[Tuple[Tuple[jnp.ndarray]]] = None
     hidden_states: Optional[Tuple[jnp.ndarray, ...]] = None
     attentions: Optional[Tuple[jnp.ndarray, ...]] = None
-=======
->>>>>>> parent of 73193c8a5... FlaxModel + FlaxOutputs
