@@ -800,7 +800,7 @@ class FlaxMixtralModule(nn.Module):
         hidden_states = outputs[0]
 
         if output_attentions:
-            all_self_attns += (outputs[1],)
+            all_self_attns += (outputs[2],)
 
         if output_router_logits:
             all_router_logits += (outputs[-1],)
