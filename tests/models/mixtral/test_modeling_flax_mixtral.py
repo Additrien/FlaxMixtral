@@ -31,7 +31,7 @@ if is_flax_available():
 
 
 if is_tokenizers_available():
-    from transformers import MixtralTokenizerFast
+    from transformers import LlamaTokenizerFast
 
 
 class FlaxMixtralModelTester:
@@ -45,9 +45,9 @@ class FlaxMixtralModelTester:
         use_token_type_ids=False,
         use_labels=True,
         vocab_size=99,
-        hidden_size=16,
+        hidden_size=64,
         num_hidden_layers=2,
-        num_attention_heads=2,
+        num_attention_heads=8,
         intermediate_size=64,
         hidden_act="gelu",
         hidden_dropout_prob=0.1,
@@ -55,6 +55,7 @@ class FlaxMixtralModelTester:
         max_position_embeddings=512,
         window_size=7,
         initializer_range=0.02,
+        sliding_window=4096
     ):
         self.parent = parent
         self.batch_size = batch_size
@@ -74,6 +75,7 @@ class FlaxMixtralModelTester:
         self.max_position_embeddings = max_position_embeddings
         self.window_size = window_size
         self.initializer_range = initializer_range
+        self.sliding_window = sliding_window
         self.scope = None
         self.bos_token_id = vocab_size - 1
         self.eos_token_id = vocab_size - 1
@@ -99,6 +101,7 @@ class FlaxMixtralModelTester:
             use_cache=True,
             is_decoder=False,
             initializer_range=self.initializer_range,
+            sliding_window=self.sliding_window,
         )
 
         return (config, input_ids, input_mask)
@@ -241,7 +244,7 @@ class FlaxMixtralIntegrationTest(unittest.TestCase):
         self.assertTrue(np.allclose(flax_hidden_means, EXPECTED_HIDDEN_MEANS, atol=1e-4))
 
     def test_generated_text(self):
-        tokenizer = MixtralTokenizerFast.from_pretrained(self.model_id)
+        tokenizer = LlamaTokenizerFast.from_pretrained(self.model_id)
         tokenizer.pad_token_id = 2
         test_batch = ["Aloha, World! ", "2 + 2 = ", "Paris is the capital of ", "我很高興認識"]
 
