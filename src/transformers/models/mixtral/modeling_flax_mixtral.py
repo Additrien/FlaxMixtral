@@ -868,8 +868,7 @@ class FlaxMixtralForCausalLMModule(nn.Module):
         FlaxMoeCausalLMOutputWithPast(
             logits=lm_logits,
             hidden_states=hidden_states,
-            attentions=outputs.attentions,
-            router_logits=outputs.router_logits,
+            attentions=outputs.attentions
         )
 
 @add_start_docstrings(
