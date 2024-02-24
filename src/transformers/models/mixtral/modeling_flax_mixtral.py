@@ -32,7 +32,7 @@ from jax import lax
 
 from ...modeling_flax_outputs import (
     FlaxMoeCausalLMOutputWithPast,
-    FlaxMoeModelOutputWithPast,
+    FlaxBaseModelOutput,
     FlaxSequenceClassifierOutputWithPast,
     FlaxCausalLMOutput
 )
@@ -535,7 +535,6 @@ class FlaxMixtralDecoderLayer(nn.Module):
         deterministic: bool = True,
         init_cache: bool = False,
         output_attentions: bool = False,
-        output_router_logits: bool = False,
     ):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -557,11 +556,8 @@ class FlaxMixtralDecoderLayer(nn.Module):
         hidden_states, router_logits = self.block_sparse_moe(hidden_states)
         # residual connection
         hidden_states = residual + hidden_states
-        print("Layer: ", output_router_logits)
-        if output_router_logits:
-            return (hidden_states,) + outputs[1:] + (router_logits,)
-        else:
-            return (hidden_states,) + outputs[1:]
+        
+        return (hidden_states,) + outputs[1:]
 
 
 # Copied from transformers.models.gpt_neo.modeling_flax_gpt_neo.FlaxGPTNeoPreTrainedModel with GPTNeo->Mixtral, GPT_NEO->MIXTRAL, transformer->model
@@ -716,12 +712,10 @@ class FlaxMixtralLayerCollection(nn.Module):
         init_cache: bool = False,
         output_attentions: bool = False,
         output_hidden_states: bool = False,
-        output_router_logits: bool = False,
         return_dict: bool = False,
     ):
         all_attentions = () if output_attentions else None
         all_hidden_states = () if output_hidden_states else None
-        all_router_logits = () if output_router_logits else None
 
         for block in self.blocks:
             if output_hidden_states:
@@ -739,11 +733,8 @@ class FlaxMixtralLayerCollection(nn.Module):
             if output_attentions:
                 all_attentions += (layer_outputs[1],)
 
-            if output_router_logits:
-                all_router_logits += (layer_outputs[-1],)
-
         # this contains possible `None` values - `FlaxMixtralModule` will filter them out
-        outputs = (hidden_states, all_hidden_states, all_attentions, all_router_logits)
+        outputs = (hidden_states, all_hidden_states, all_attentions)
 
         return outputs
 
@@ -773,13 +764,11 @@ class FlaxMixtralModule(nn.Module):
         init_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        output_router_logits: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ):
         
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
-        all_router_logits = () if output_router_logits else None
         input_embeds = self.embed_tokens(input_ids.astype("i4"))
                 
         outputs = self.layers(
@@ -789,7 +778,6 @@ class FlaxMixtralModule(nn.Module):
             deterministic=deterministic,
             init_cache=init_cache,
             output_attentions=output_attentions,
-            output_router_logits=output_router_logits,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
@@ -799,9 +787,6 @@ class FlaxMixtralModule(nn.Module):
         if output_attentions:
             all_self_attns += (outputs[1],)
 
-        if output_router_logits:
-            all_router_logits += (outputs[-1],)
-
         hidden_states = self.norm(hidden_states)
 
         if output_hidden_states:
@@ -810,15 +795,14 @@ class FlaxMixtralModule(nn.Module):
         if not return_dict:
             return tuple(
                 v
-                for v in [hidden_states, all_hidden_states, all_self_attns, all_router_logits]
+                for v in [hidden_states, all_hidden_states, all_self_attns]
                 if v is not None
             )
 
-        return FlaxMoeModelOutputWithPast(
+        return FlaxBaseModelOutput(
             last_hidden_state=hidden_states,
             hidden_states=all_hidden_states,
-            attentions=all_self_attns,
-            router_logits=all_router_logits,
+            attentions=all_self_attns
         )
 
 
@@ -834,7 +818,7 @@ class FlaxMixtralModel(FlaxMixtralPreTrainedModel):
 append_call_sample_docstring(
     FlaxMixtralModel,
     _CHECKPOINT_FOR_DOC,
-    FlaxMoeModelOutputWithPast,
+    FlaxBaseModelOutput,
     _CONFIG_FOR_DOC,
     real_checkpoint=_REAL_CHECKPOINT_FOR_DOC,
 )
@@ -862,10 +846,8 @@ class FlaxMixtralForCausalLMModule(nn.Module):
         init_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        output_router_logits: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ):
-        print("output_router_logits: ", output_router_logits)
         outputs = self.model(
             input_ids,
             position_ids=position_ids,
@@ -874,31 +856,16 @@ class FlaxMixtralForCausalLMModule(nn.Module):
             init_cache=init_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            output_router_logits=output_router_logits,
             return_dict=return_dict,
         )
         hidden_states = outputs[0]
         lm_logits = self.lm_head(hidden_states)
 
-        aux_loss = None
-        if output_router_logits:
-            aux_loss = load_balancing_loss_func(
-                outputs.router_logits if return_dict else outputs[-1],
-                self.config.num_local_experts,
-                self.config.num_experts_per_tok,
-                attention_mask,
-            )
-
         if not return_dict:
             output = (lm_logits,) + outputs[1:]
-            if output_router_logits:
-                output = (aux_loss,) + output
             return output
 
-        print("#######################CausalLM####################### ", output_router_logits)
-        # return FlaxCausalLMOutput(logits=lm_logits, hidden_states=outputs.hidden_states, attentions=outputs.attentions)
         FlaxMoeCausalLMOutputWithPast(
-            aux_loss=aux_loss,
             logits=lm_logits,
             hidden_states=hidden_states,
             attentions=outputs.attentions,
