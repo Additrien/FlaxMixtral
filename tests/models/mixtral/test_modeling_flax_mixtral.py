@@ -50,7 +50,7 @@ class FlaxMixtralModelTester:
         num_hidden_layers=1,
         num_attention_heads=8,
         intermediate_size=64,
-        hidden_act="gelu",
+        hidden_act="silu",
         hidden_dropout_prob=0.1,
         attention_probs_dropout_prob=0.1,
         max_position_embeddings=512,
@@ -104,6 +104,7 @@ class FlaxMixtralModelTester:
             is_decoder=False,
             initializer_range=self.initializer_range,
             sliding_window=self.sliding_window,
+            output_router_logits=self.output_router_logits
         )
 
         return (config, input_ids, input_mask)

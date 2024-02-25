@@ -33,6 +33,7 @@ from jax import lax
 
 from ...modeling_flax_outputs import (
     FlaxMoeModelOutputWithPast,
+    FlaxMoeCausalLMOutputWithPast,
     FlaxCausalLMOutput
 )
 from ...modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring
@@ -897,7 +898,14 @@ class FlaxMixtralForCausalLMModule(nn.Module):
                 output = (aux_loss,) + output
             return output
 
-        return FlaxCausalLMOutput(logits=lm_logits, hidden_states=outputs.hidden_states, attentions=outputs.attentions)
+        return FlaxMoeCausalLMOutputWithPast(
+            aux_loss=aux_loss,
+            logits=lm_logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+            router_logits=outputs.router_logits,
+        )
+        # return FlaxCausalLMOutput(logits=lm_logits, hidden_states=outputs.hidden_states, attentions=outputs.attentions)
 
 
 @add_start_docstrings(
