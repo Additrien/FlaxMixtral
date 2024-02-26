@@ -383,7 +383,7 @@ class FlaxMoeModelOutputWithPast(ModelOutput):
 
 
 @flax.struct.dataclass
-class MoeCausalLMOutputWithPast(ModelOutput):
+class FlaxMoeCausalLMOutputWithPast(ModelOutput):
     """
     Base class for causal language model (or autoregressive) with mixture of experts outputs.
 
