@@ -330,7 +330,7 @@ class FlaxModelTesterMixin:
     @is_pt_flax_cross_test
     def test_equivalence_flax_to_pt(self):
         config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
-
+        
         for model_class in self.all_model_classes:
             with self.subTest(model_class.__name__):
                 # Output all for aggressive testing
@@ -410,7 +410,7 @@ class FlaxModelTesterMixin:
 
                 outputs_loaded = model_loaded(**prepared_inputs_dict).to_tuple()
                 for output_loaded, output in zip(outputs_loaded, outputs):
-                    self.assert_almost_equals(output_loaded, output, 1e-3)
+                    self.assert_almost_equals(jnp.array(output_loaded), jnp.array(output), 1e-3)
 
                 # verify that save_pretrained for distributed training
                 # with `params=params` works as expected
@@ -420,7 +420,7 @@ class FlaxModelTesterMixin:
 
                 outputs_loaded = model_loaded(**prepared_inputs_dict).to_tuple()
                 for output_loaded, output in zip(outputs_loaded, outputs):
-                    self.assert_almost_equals(output_loaded, output, 1e-3)
+                    self.assert_almost_equals(jnp.array(output_loaded), jnp.array(output), 1e-3)
 
     def test_save_load_from_base(self):
         config, _ = self.model_tester.prepare_config_and_inputs_for_common()
@@ -683,7 +683,7 @@ class FlaxModelTesterMixin:
             self.assertEqual(len(attentions), self.model_tester.num_hidden_layers)
 
             self.assertListEqual(
-                list(attentions[0].shape[-3:]),
+                list(attentions[0][0].shape[-3:]),
                 [self.model_tester.num_attention_heads, encoder_seq_length, encoder_key_length],
             )
             out_len = len(outputs)
@@ -711,7 +711,7 @@ class FlaxModelTesterMixin:
                 self.assertIsInstance(cross_attentions, (list, tuple))
                 self.assertEqual(len(cross_attentions), self.model_tester.num_hidden_layers)
                 self.assertListEqual(
-                    list(cross_attentions[0].shape[-3:]),
+                    list(cross_attentions[0][0].shape[-3:]),
                     [
                         self.model_tester.num_attention_heads,
                         decoder_seq_length,
@@ -737,7 +737,7 @@ class FlaxModelTesterMixin:
             self.assertEqual(len(self_attentions), self.model_tester.num_hidden_layers)
 
             self.assertListEqual(
-                list(self_attentions[0].shape[-3:]),
+                list(self_attentions[0][0].shape[-3:]),
                 [self.model_tester.num_attention_heads, encoder_seq_length, encoder_key_length],
             )
 

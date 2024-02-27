@@ -43,14 +43,14 @@ class FlaxMixtralModelTester:
         is_training=True,
         use_input_mask=True,
         use_token_type_ids=False,
-        output_router_logits=False,
+        output_router_logits=True,
         use_labels=True,
         vocab_size=99,
         hidden_size=64,
         num_hidden_layers=1,
         num_attention_heads=8,
         intermediate_size=64,
-        hidden_act="silu",
+        hidden_act="gelu",
         hidden_dropout_prob=0.1,
         attention_probs_dropout_prob=0.1,
         max_position_embeddings=512,
@@ -175,7 +175,7 @@ class FlaxMixtralModelTester:
 
         outputs = model(input_ids, attention_mask=attention_mask)
 
-        diff = np.max(np.abs((outputs_cache_next[0][:, -1, :5] - outputs[0][:, -1, :5])))
+        diff = np.max(np.abs((outputs_cache_next[0][:, -1, :5][:, -1, :5] - outputs[0][:, -1, :5])))
         self.parent.assertTrue(diff < 1e-3, msg=f"Max diff is {diff}")
 
 
@@ -202,7 +202,7 @@ class FlaxMixtralModelTest(FlaxModelTesterMixin, FlaxGenerationTesterMixin, unit
     @slow
     def test_model_from_pretrained(self):
         for model_class_name in self.all_model_classes:
-            model = model_class_name.from_pretrained("openlm-research/open_mixtral_3b_v2", from_pt=True)
+            model = model_class_name.from_pretrained("hf-internal-testing/Mixtral-tiny", from_pt=True)
             outputs = model(np.ones((1, 1)))
             self.assertIsNotNone(outputs)
 
@@ -211,7 +211,7 @@ class FlaxMixtralModelTest(FlaxModelTesterMixin, FlaxGenerationTesterMixin, unit
 @require_flax
 class FlaxMixtralIntegrationTest(unittest.TestCase):
     def setUp(self):
-        self.model_id = "openlm-research/open_mixtral_3b_v2"
+        self.model_id = "hf-internal-testing/Mixtral-tiny"
         self.model = FlaxMixtralForCausalLM.from_pretrained(self.model_id, from_pt=True)
         self.test_batch = jnp.arange(32).reshape(4, 8) + 1911
 
