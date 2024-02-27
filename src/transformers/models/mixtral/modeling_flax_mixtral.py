@@ -740,7 +740,6 @@ class FlaxMixtralLayerCollection(nn.Module):
 
             if output_attentions:
                 all_attentions += (layer_outputs[1],)
-
             if self.config.output_router_logits:
                 all_router_logits += (layer_outputs[-1],)
 
@@ -796,12 +795,14 @@ class FlaxMixtralModule(nn.Module):
         )
         
         hidden_states = outputs[0]
-
+        # print("POPOPOPO")
+        # print("outputs[2]: ", outputs[2])
+        # print("(outputs[2],): ", (outputs[2],))
         if output_attentions:
-            all_self_attns += (outputs[2],)
+            all_self_attns += outputs[2]
 
         if self.config.output_router_logits:
-            all_router_logits += (outputs[-1],)
+            all_router_logits += (outputs[-1][0],)
 
         hidden_states = self.norm(hidden_states)
 
