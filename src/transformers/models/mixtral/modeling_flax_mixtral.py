@@ -519,7 +519,6 @@ class FlaxMixtralSparseMoeBlock(nn.Module):
         return final_hidden_states, router_logits
 
 
-# Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaDecoderLayer with Llama->Mixtral
 class FlaxMixtralDecoderLayer(nn.Module):
     config: MixtralConfig
     dtype: jnp.dtype = jnp.float32
@@ -538,7 +537,7 @@ class FlaxMixtralDecoderLayer(nn.Module):
         deterministic: bool = True,
         init_cache: bool = False,
         output_attentions: bool = False,
-        output_router_logits: bool = False,
+        # output_router_logits: bool = False,
     ):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -560,11 +559,21 @@ class FlaxMixtralDecoderLayer(nn.Module):
         hidden_states, router_logits = self.block_sparse_moe(hidden_states)
         # residual connection
         hidden_states = residual + hidden_states
+        outputs = (hidden_states,)
 
-        if output_router_logits:
-            return (hidden_states,) + outputs[1:] + (router_logits,)
-        else:
-            return (hidden_states,) + outputs[1:]
+        if output_attentions:
+            outputs += (outputs[1],)
+
+        if self.config.output_router_logits:
+            outputs += (router_logits,)
+
+        return outputs
+
+
+        # if output_router_logits:
+        #     return (hidden_states,) + outputs[1:] + (router_logits,)
+        # else:
+        #     return (hidden_states,) + outputs[1:]
 
 
 # Copied from transformers.models.gpt_neo.modeling_flax_gpt_neo.FlaxGPTNeoPreTrainedModel with GPTNeo->Mixtral, GPT_NEO->MIXTRAL, transformer->model
@@ -599,7 +608,6 @@ class FlaxMixtralPreTrainedModel(FlaxPreTrainedModel):
         rngs = {"params": params_rng, "dropout": dropout_rng}
 
         random_params = self.module.init(rngs, input_ids, attention_mask, position_ids, return_dict=False)["params"]
-
         if params is not None:
             random_params = flatten_dict(unfreeze(random_params))
             params = flatten_dict(unfreeze(params))
@@ -609,7 +617,7 @@ class FlaxMixtralPreTrainedModel(FlaxPreTrainedModel):
             return freeze(unflatten_dict(params))
         else:
             return random_params
-
+        
     def init_cache(self, batch_size, max_length):
         r"""
         Args:
@@ -720,12 +728,12 @@ class FlaxMixtralLayerCollection(nn.Module):
         init_cache: bool = False,
         output_attentions: bool = False,
         output_hidden_states: bool = False,
-        output_router_logits: bool = False,
+        # output_router_logits: bool = False,
         return_dict: bool = False,
     ):
         all_attentions = () if output_attentions else None
         all_hidden_states = () if output_hidden_states else None
-        all_router_logits = () if output_router_logits else None
+        all_router_logits = () if self.config.output_router_logits else None
 
         for block in self.blocks:
             if output_hidden_states:
@@ -743,7 +751,7 @@ class FlaxMixtralLayerCollection(nn.Module):
             if output_attentions:
                 all_attentions += (layer_outputs[1],)
 
-            if output_router_logits:
+            if self.config.output_router_logits:
                 all_router_logits += (layer_outputs[-1],)
 
         # this contains possible `None` values - `FlaxMixtralModule` will filter them out
@@ -777,13 +785,13 @@ class FlaxMixtralModule(nn.Module):
         init_cache: bool = False,
         output_attentions: bool = False,
         output_hidden_states: bool = False,
-        output_router_logits: bool = False,
+        # output_router_logits: bool = False,
         return_dict: bool = True,
     ):
         
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
-        all_router_logits = () if output_router_logits else None
+        all_router_logits = () if self.config.output_router_logits else None
 
         input_embeds = self.embed_tokens(input_ids.astype("i4"))
                 
@@ -794,7 +802,7 @@ class FlaxMixtralModule(nn.Module):
             deterministic=deterministic,
             init_cache=init_cache,
             output_attentions=output_attentions,
-            output_router_logits=output_router_logits,
+            # output_router_logits=self.config.output_router_logits,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
@@ -804,7 +812,7 @@ class FlaxMixtralModule(nn.Module):
         if output_attentions:
             all_self_attns += (outputs[2],)
 
-        if output_router_logits:
+        if self.config.output_router_logits:
             all_router_logits += (outputs[-1],)
 
         hidden_states = self.norm(hidden_states)
@@ -867,7 +875,7 @@ class FlaxMixtralForCausalLMModule(nn.Module):
         init_cache: bool = False,
         output_attentions: bool = False,
         output_hidden_states: bool = False,
-        output_router_logits: bool = False,
+        # output_router_logits: bool = False,
         return_dict: bool = True,
     ):
         outputs = self.model(
@@ -885,7 +893,7 @@ class FlaxMixtralForCausalLMModule(nn.Module):
         lm_logits = self.lm_head(hidden_states)
 
         aux_loss = None
-        if output_router_logits:
+        if self.config.output_router_logits:
             aux_loss = load_balancing_loss_func(
                 outputs.router_logits if return_dict else outputs[-1],
                 self.config.num_local_experts,
@@ -895,7 +903,7 @@ class FlaxMixtralForCausalLMModule(nn.Module):
 
         if not return_dict:
             output = (lm_logits,) + outputs[1:]
-            if output_router_logits:
+            if self.config.output_router_logits:
                 output = (aux_loss,) + output
             return output
 
@@ -906,7 +914,6 @@ class FlaxMixtralForCausalLMModule(nn.Module):
             attentions=outputs.attentions,
             router_logits=outputs.router_logits,
         )
-        # return FlaxCausalLMOutput(logits=lm_logits, hidden_states=outputs.hidden_states, attentions=outputs.attentions)
 
 
 @add_start_docstrings(
