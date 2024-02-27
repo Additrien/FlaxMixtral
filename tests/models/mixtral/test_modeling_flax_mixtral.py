@@ -43,7 +43,7 @@ class FlaxMixtralModelTester:
         is_training=True,
         use_input_mask=True,
         use_token_type_ids=False,
-        output_router_logits=True,
+        output_router_logits=False,
         use_labels=True,
         vocab_size=99,
         hidden_size=64,

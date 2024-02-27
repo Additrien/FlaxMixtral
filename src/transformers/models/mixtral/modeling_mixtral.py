@@ -848,7 +848,6 @@ class MixtralSparseMoeBlock(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
         # router_logits: (batch * sequence_length, n_experts)
         router_logits = self.gate(hidden_states)
-        print("sparse block: ", router_logits)
         routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
         routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
@@ -948,7 +947,6 @@ class MixtralDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states, router_logits = self.block_sparse_moe(hidden_states)
-        print("decoder: ", router_logits)
         hidden_states = residual + hidden_states
         outputs = (hidden_states,)
 
@@ -1247,7 +1245,6 @@ class MixtralModel(MixtralPreTrainedModel):
                 all_self_attns += (layer_outputs[1],)
 
             if output_router_logits:
-                print("model: ", (layer_outputs[-1],))
                 all_router_logits += (layer_outputs[-1],)
 
         hidden_states = self.norm(hidden_states)
