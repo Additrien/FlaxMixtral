@@ -174,9 +174,6 @@ class FlaxMixtralModelTester:
         )
 
         outputs = model(input_ids, attention_mask=attention_mask)
-        # print("outputs_cache_next[0][:, -1, :5][:, -1, :5]: ", outputs_cache_next[0])
-        # print("outputs[0][:, -1, :5]: ", outputs[0][:, -1, :5])
-        # diff = np.max(np.abs((outputs_cache_next[0][:, -1, :5][:, -1, :5] - outputs[0][:, -1, :5])))
         diff = np.max(np.abs(outputs_cache_next[0][:, -1][:5] - outputs[0][:, -1][:5]))
         self.parent.assertTrue(diff < 1e-3, msg=f"Max diff is {diff}")
 

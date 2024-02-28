@@ -31,12 +31,11 @@ from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import lax
 
 from ...modeling_flax_outputs import (
-    FlaxMoeModelOutputWithPast,
     # FlaxMoeCausalLMOutputWithPast,
-    FlaxCausalLMOutput
+    FlaxCausalLMOutput,
+    FlaxMoeCausalLMOutputWithPast,
+    FlaxMoeModelOutputWithPast,
 )
-
-from ...modeling_flax_outputs import FlaxMoeCausalLMOutputWithPast
 from ...modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring
 from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging
 from .configuration_mixtral import MixtralConfig
@@ -132,9 +131,7 @@ MIXTRAL_INPUTS_DOCSTRING = r"""
 """
 
 
-def load_balancing_loss_func(
-    gate_logits, num_experts = None, top_k=2, attention_mask = None
-) -> float:
+def load_balancing_loss_func(gate_logits, num_experts=None, top_k=2, attention_mask=None) -> float:
     r"""
     Computes auxiliary load balancing loss as in Switch Transformer - implemented in Flax.
 
@@ -160,8 +157,10 @@ def load_balancing_loss_func(
 
     if isinstance(gate_logits, tuple):
         compute_device = gate_logits[0].device()
-        concatenated_gate_logits = jnp.concatenate([jax.device_put(layer_gate, compute_device) for layer_gate in gate_logits], axis=0)
-    
+        concatenated_gate_logits = jnp.concatenate(
+            [jax.device_put(layer_gate, compute_device) for layer_gate in gate_logits], axis=0
+        )
+
     routing_weights = nn.activation.softmax(concatenated_gate_logits, axis=-1)
 
     _, selected_experts = jax.lax.topk(routing_weights, top_k)
@@ -180,7 +179,9 @@ def load_balancing_loss_func(
 
         # Compute the mask that masks all padding tokens as 0 with the same shape of expert_mask
         expert_attention_mask = attention_mask[None, :, :, None, None]
-        expert_attention_mask = jnp.broadcast_to(expert_attention_mask, (num_hidden_layers, batch_size, sequence_length, 2, num_experts))
+        expert_attention_mask = jnp.broadcast_to(
+            expert_attention_mask, (num_hidden_layers, batch_size, sequence_length, 2, num_experts)
+        )
         expert_attention_mask = jnp.reshape(expert_attention_mask, (-1, 2, num_experts))
         expert_attention_mask = jax.device_put(expert_attention_mask, compute_device)
 
@@ -191,7 +192,9 @@ def load_balancing_loss_func(
 
         # Compute the mask that masks all padding tokens as 0 with the same shape of tokens_per_expert
         router_per_expert_attention_mask = attention_mask[None, :, :, None]
-        router_per_expert_attention_mask = jnp.broadcast_to(router_per_expert_attention_mask, (num_hidden_layers, batch_size, sequence_length, num_experts))
+        router_per_expert_attention_mask = jnp.broadcast_to(
+            router_per_expert_attention_mask, (num_hidden_layers, batch_size, sequence_length, num_experts)
+        )
         router_per_expert_attention_mask = jnp.reshape(router_per_expert_attention_mask, (-1, num_experts))
         router_per_expert_attention_mask = jax.device_put(router_per_expert_attention_mask, compute_device)
 
@@ -415,7 +418,7 @@ class FlaxMixtralBLockSparseTop2MLP(nn.Module):
         current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
         current_hidden_states = self.w2(current_hidden_states)
 
-        return(current_hidden_states)
+        return current_hidden_states
 
 
 class FlaxMixtralBlockSparesTop2MLPCollection(nn.Module):
@@ -424,26 +427,14 @@ class FlaxMixtralBlockSparesTop2MLPCollection(nn.Module):
 
     def setup(self) -> None:
         self.experts = [
-            FlaxMixtralBLockSparseTop2MLP(
-                config=self.config,
-                dtype=self.dtype,
-                name=str(i)
-            )
+            FlaxMixtralBLockSparseTop2MLP(config=self.config, dtype=self.dtype, name=str(i))
             for i in range(self.config.num_local_experts)
         ]
 
     def __call__(
-            self,
-            expert_mask,
-            hidden_states,
-            routing_weights,
-            batch_size: int,
-            sequence_length: int,
-            hidden_dim: int
+        self, expert_mask, hidden_states, routing_weights, batch_size: int, sequence_length: int, hidden_dim: int
     ):
-        final_hidden_states = jnp.zeros(
-            ((batch_size * sequence_length) + 1, hidden_dim), dtype=hidden_states.dtype
-        )
+        final_hidden_states = jnp.zeros(((batch_size * sequence_length) + 1, hidden_dim), dtype=hidden_states.dtype)
 
         for expert_idx in range(self.config.num_local_experts):
             selected_mask = expert_mask[expert_idx]
@@ -451,7 +442,7 @@ class FlaxMixtralBlockSparesTop2MLPCollection(nn.Module):
 
             if top_x.shape[0] == 0:
                 continue
-            
+
             def expert(layer, input_hidden_states):
                 current_state = hidden_states[top_x]
                 current_hidden_states = layer.experts[expert_idx](current_state) * routing_weights[top_x, idx, None]
@@ -480,6 +471,7 @@ class FlaxMixtralSparseMoeBlock(nn.Module):
     capacity factor to number of experts and thus waste computation
     and memory on padding.
     """
+
     config: MixtralConfig
     dtype: jnp.dtype = jnp.float32
 
@@ -488,8 +480,8 @@ class FlaxMixtralSparseMoeBlock(nn.Module):
         self.experts = FlaxMixtralBlockSparesTop2MLPCollection(config=self.config, dtype=self.dtype)
 
     def __call__(
-            self,
-            hidden_states,
+        self,
+        hidden_states,
     ):
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.reshape(-1, hidden_dim)
@@ -498,7 +490,7 @@ class FlaxMixtralSparseMoeBlock(nn.Module):
         routing_weights = jax.nn.softmax(router_logits, axis=1)
 
         routing_weights, selected_experts = jax.lax.top_k(routing_weights, self.config.num_experts_per_tok)
-        
+
         routing_weights /= jnp.sum(routing_weights, axis=-1, keepdims=True)
         # we cast back to the input dtype
         routing_weights = routing_weights.astype(hidden_states.dtype)
@@ -541,7 +533,7 @@ class FlaxMixtralDecoderLayer(nn.Module):
     ):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        
+
         outputs = self.self_attn(
             hidden_states,
             attention_mask=attention_mask,
@@ -672,7 +664,7 @@ class FlaxMixtralPreTrainedModel(FlaxPreTrainedModel):
             mutable = ["cache"]
         else:
             mutable = False
-        
+
         outputs = self.module.apply(
             inputs,
             jnp.array(input_ids, dtype="i4"),
@@ -776,13 +768,12 @@ class FlaxMixtralModule(nn.Module):
         output_hidden_states: bool = False,
         return_dict: bool = True,
     ):
-        
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         all_router_logits = () if self.config.output_router_logits else None
 
         input_embeds = self.embed_tokens(input_ids.astype("i4"))
-                
+
         outputs = self.layers(
             input_embeds,
             position_ids=position_ids,
@@ -793,16 +784,13 @@ class FlaxMixtralModule(nn.Module):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-        
+
         hidden_states = outputs[0]
-        # print("POPOPOPO")
-        # print("outputs[2]: ", outputs[2])
-        # print("(outputs[2],): ", (outputs[2],))
         if output_attentions:
             all_self_attns += outputs[2]
 
         if self.config.output_router_logits:
-            all_router_logits += (outputs[-1][0],)
+            all_router_logits += outputs[-1]
 
         hidden_states = self.norm(hidden_states)
 
@@ -811,9 +799,7 @@ class FlaxMixtralModule(nn.Module):
 
         if not return_dict:
             return tuple(
-                v
-                for v in [hidden_states, all_hidden_states, all_self_attns, all_router_logits]
-                if v is not None
+                v for v in [hidden_states, all_hidden_states, all_self_attns, all_router_logits] if v is not None
             )
 
         return FlaxMoeModelOutputWithPast(

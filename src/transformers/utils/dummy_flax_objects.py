@@ -918,6 +918,7 @@ class FlaxMistralPreTrainedModel(metaclass=DummyObject):
     def __init__(self, *args, **kwargs):
         requires_backends(self, ["flax"])
 
+
 class FlaxMixtralForCausalLM(metaclass=DummyObject):
     _backends = ["flax"]
 
@@ -937,6 +938,7 @@ class FlaxMixtralPreTrainedModel(metaclass=DummyObject):
 
     def __init__(self, *args, **kwargs):
         requires_backends(self, ["flax"])
+
 
 class FlaxMT5EncoderModel(metaclass=DummyObject):
     _backends = ["flax"]

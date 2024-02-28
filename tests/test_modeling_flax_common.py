@@ -262,7 +262,6 @@ class FlaxModelTesterMixin:
             fx_outputs[fx_nans] = 0
             pt_outputs[pt_nans] = 0
             fx_outputs[pt_nans] = 0
-
             max_diff = np.amax(np.abs(fx_outputs - pt_outputs))
             self.assertLessEqual(
                 max_diff, tol, f"{name}: Difference between PyTorch and Flax is {max_diff} (>= {tol})."
@@ -325,10 +324,7 @@ class FlaxModelTesterMixin:
                 pt_keys = tuple([k for k, v in pt_outputs.items() if v is not None])
 
                 self.assertEqual(fx_keys, pt_keys)
-                print("fx_outputs_loaded: ", fx_outputs_loaded)
-                print("np.around(fx_outputs_loaded, 4): ", np.around(fx_outputs_loaded, 4))
-                print("pt_outputs: ", pt_outputs)
-                self.check_pt_flax_outputs(np.around(fx_outputs_loaded, 4), pt_outputs, model_class)
+                self.check_pt_flax_outputs(fx_outputs_loaded, pt_outputs, model_class)
 
     @is_pt_flax_cross_test
     def test_equivalence_flax_to_pt(self):
@@ -387,7 +383,7 @@ class FlaxModelTesterMixin:
                 pt_keys = tuple([k for k, v in pt_outputs_loaded.items() if v is not None])
 
                 self.assertEqual(fx_keys, pt_keys)
-                self.check_pt_flax_outputs(np.around(fx_outputs, 4), pt_outputs_loaded, model_class)
+                self.check_pt_flax_outputs(fx_outputs, pt_outputs_loaded, model_class)
 
     def test_from_pretrained_save_pretrained(self):
         config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
