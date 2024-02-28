@@ -254,8 +254,7 @@ class FlaxMixtralRotaryEmbedding(nn.Module):
 
     def setup(self):
         head_dim = self.config.hidden_size // self.config.num_attention_heads
-        # self.sincos = create_sinusoidal_positions(self.config.max_position_embeddings, head_dim)
-        self.sincos = create_sinusoidal_positions(4096, head_dim)
+        self.sincos = create_sinusoidal_positions(self.config.max_position_embeddings, head_dim)
 
     def __call__(self, key, query, position_ids):
         sincos = self.sincos[position_ids]
@@ -282,8 +281,7 @@ class FlaxMixtralAttention(nn.Module):
         self.head_dim = self.hidden_size // self.num_heads
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        # self.max_position_embeddings = config.max_position_embeddings
-        self.max_position_embeddings = 4096
+        self.max_position_embeddings = config.max_position_embeddings
         self.attention_softmax_in_fp32 = self.dtype is not jnp.float32
         self.rope_theta = config.rope_theta
         if (self.head_dim * self.num_heads) != self.hidden_size:
@@ -295,8 +293,7 @@ class FlaxMixtralAttention(nn.Module):
         self.k_proj = nn.Dense(self.num_key_value_heads * self.head_dim, use_bias=False, dtype=self.dtype)
         self.v_proj = nn.Dense(self.num_key_value_heads * self.head_dim, use_bias=False, dtype=self.dtype)
         self.o_proj = nn.Dense(self.hidden_size, use_bias=False, dtype=self.dtype)
-        # casual_mask = make_causal_mask(jnp.ones((1, config.max_position_embeddings), dtype="bool"), dtype="bool")
-        casual_mask = make_causal_mask(jnp.ones((1, 4096), dtype="bool"), dtype="bool")
+        casual_mask = make_causal_mask(jnp.ones((1, config.max_position_embeddings), dtype="bool"), dtype="bool")
         self.causal_mask = jnp.triu(casual_mask, k=-config.sliding_window)
         self.rotary_emb = FlaxMixtralRotaryEmbedding(config, dtype=self.dtype)
 
@@ -511,7 +508,6 @@ class FlaxMixtralSparseMoeBlock(nn.Module):
         return final_hidden_states, router_logits
 
 
-# Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaDecoderLayer with Llama->Mixtral
 class FlaxMixtralDecoderLayer(nn.Module):
     config: MixtralConfig
     dtype: jnp.dtype = jnp.float32
@@ -691,7 +687,6 @@ class FlaxMixtralPreTrainedModel(FlaxPreTrainedModel):
         return outputs
 
 
-# Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaLayerCollection with Llama->Mixtral
 class FlaxMixtralLayerCollection(nn.Module):
     config: MixtralConfig
     dtype: jnp.dtype = jnp.float32
