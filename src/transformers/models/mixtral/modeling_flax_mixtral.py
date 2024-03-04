@@ -31,7 +31,6 @@ from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import lax
 
 from ...modeling_flax_outputs import (
-    # FlaxMoeCausalLMOutputWithPast,
     FlaxCausalLMOutput,
     FlaxMoeCausalLMOutputWithPast,
     FlaxMoeModelOutputWithPast,

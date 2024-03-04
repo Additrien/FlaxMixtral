@@ -499,7 +499,7 @@ class FlaxLlamaPreTrainedModel(FlaxPreTrainedModel):
             mutable = ["cache"]
         else:
             mutable = False
-        print(inputs)
+
         outputs = self.module.apply(
             inputs,
             jnp.array(input_ids, dtype="i4"),
