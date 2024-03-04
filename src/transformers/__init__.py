@@ -130,6 +130,7 @@ _import_structure = {
     ],
     "models": [],
     # Models
+    "models.starcoder2": ["STARCODER2_PRETRAINED_CONFIG_ARCHIVE_MAP", "Starcoder2Config", "Starcoder2Tokenizer"],
     "models.albert": ["ALBERT_PRETRAINED_CONFIG_ARCHIVE_MAP", "AlbertConfig"],
     "models.align": [
         "ALIGN_PRETRAINED_CONFIG_ARCHIVE_MAP",
@@ -1152,6 +1153,8 @@ except OptionalDependencyNotAvailable:
     ]
 else:
     # Fast tokenizers structure
+    _import_structure["models.phi"].append("PhiTokenizerFast")
+    _import_structure["models.starcoder2"].append("Starcoder2TokenizerFast")
     _import_structure["models.albert"].append("AlbertTokenizerFast")
     _import_structure["models.bart"].append("BartTokenizerFast")
     _import_structure["models.barthez"].append("BarthezTokenizerFast")
@@ -4593,6 +4596,34 @@ else:
 
     # Flax models structure
 
+    _import_structure["models.phi"].extend(
+        [
+            "FlaxPhiForMaskedLM",
+            "FlaxPhiForCausalLM",
+            "FlaxPhiForMultipleChoice",
+            "FlaxPhiForQuestionAnswering",
+            "FlaxPhiForSequenceClassification",
+            "FlaxPhiForTokenClassification",
+            "FlaxPhiLayer",
+            "FlaxPhiModel",
+            "FlaxPhiPreTrainedModel",
+        ]
+    )
+
+    _import_structure["models.starcoder2"].extend(
+        [
+            "FlaxStarcoder2ForMaskedLM",
+            "FlaxStarcoder2ForCausalLM",
+            "FlaxStarcoder2ForMultipleChoice",
+            "FlaxStarcoder2ForQuestionAnswering",
+            "FlaxStarcoder2ForSequenceClassification",
+            "FlaxStarcoder2ForTokenClassification",
+            "FlaxStarcoder2Layer",
+            "FlaxStarcoder2Model",
+            "FlaxStarcoder2PreTrainedModel",
+        ]
+    )
+
     _import_structure["models.bart"].extend(
         [
             "FlaxBartDecoderPreTrainedModel",
@@ -4931,6 +4962,8 @@ if TYPE_CHECKING:
         load_tf2_weights_in_pytorch_model,
     )
     from .models.albert import ALBERT_PRETRAINED_CONFIG_ARCHIVE_MAP, AlbertConfig
+    from .models.phi import PHI_PRETRAINED_CONFIG_ARCHIVE_MAP, PhiConfig, PhiTokenizer
+    from .models.starcoder2 import STARCODER2_PRETRAINED_CONFIG_ARCHIVE_MAP, Starcoder2Config, Starcoder2Tokenizer
     from .models.align import (
         ALIGN_PRETRAINED_CONFIG_ARCHIVE_MAP,
         AlignConfig,
@@ -5935,6 +5968,8 @@ if TYPE_CHECKING:
         from .utils.dummy_tokenizers_objects import *
     else:
         # Fast tokenizers imports
+        from .models.phi import PhiTokenizerFast
+        from .models.starcoder2 import Starcoder2TokenizerFast
         from .models.albert import AlbertTokenizerFast
         from .models.bart import BartTokenizerFast
         from .models.barthez import BarthezTokenizerFast
@@ -8776,6 +8811,30 @@ if TYPE_CHECKING:
         from .modeling_flax_utils import FlaxPreTrainedModel
 
         # Flax model imports
+
+        from .models.phi import (
+            FlaxPhiForMaskedLM,
+            FlaxPhiForCausalLM,
+            FlaxPhiForMultipleChoice,
+            FlaxPhiForQuestionAnswering,
+            FlaxPhiForSequenceClassification,
+            FlaxPhiForTokenClassification,
+            FlaxPhiLayer,
+            FlaxPhiModel,
+            FlaxPhiPreTrainedModel,
+        )
+
+        from .models.starcoder2 import (
+            FlaxStarcoder2ForMaskedLM,
+            FlaxStarcoder2ForCausalLM,
+            FlaxStarcoder2ForMultipleChoice,
+            FlaxStarcoder2ForQuestionAnswering,
+            FlaxStarcoder2ForSequenceClassification,
+            FlaxStarcoder2ForTokenClassification,
+            FlaxStarcoder2Layer,
+            FlaxStarcoder2Model,
+            FlaxStarcoder2PreTrainedModel,
+        )
         from .models.albert import (
             FlaxAlbertForMaskedLM,
             FlaxAlbertForMultipleChoice,

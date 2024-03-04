@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from . import (
+    starcoder2,
     albert,
     align,
     altclip,
