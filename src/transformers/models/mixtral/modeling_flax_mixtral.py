@@ -20,6 +20,7 @@
 """Flax Mixtral model."""
 from typing import Optional, Tuple
 
+import sys
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
@@ -532,7 +533,6 @@ class FlaxMixtralDecoderLayer(nn.Module):
     ):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-
         outputs = self.self_attn(
             hidden_states,
             causal_mask=causal_mask,
@@ -717,7 +717,6 @@ class FlaxMixtralLayerCollection(nn.Module):
         all_attentions = () if output_attentions else None
         all_hidden_states = () if output_hidden_states else None
         all_router_logits = () if self.config.output_router_logits else None
-        print("Test new causal mask")
         for block in self.blocks:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
