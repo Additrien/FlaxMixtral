@@ -56,7 +56,7 @@ class FlaxMixtralModelTester:
         max_position_embeddings=512,
         window_size=7,
         initializer_range=0.02,
-        sliding_window=4096
+        sliding_window=4096,
     ):
         self.parent = parent
         self.batch_size = batch_size
@@ -104,7 +104,7 @@ class FlaxMixtralModelTester:
             is_decoder=False,
             initializer_range=self.initializer_range,
             sliding_window=self.sliding_window,
-            output_router_logits=self.output_router_logits
+            output_router_logits=self.output_router_logits,
         )
 
         return (config, input_ids, input_mask)

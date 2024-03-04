@@ -20,7 +20,6 @@
 """Flax Mixtral model."""
 from typing import Optional, Tuple
 
-import sys
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
