@@ -31,6 +31,7 @@ import time
 import unittest
 from collections import defaultdict
 from collections.abc import Mapping
+from functools import wraps
 from io import StringIO
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Union
@@ -53,6 +54,7 @@ from .integrations.deepspeed import is_deepspeed_available
 from .utils import (
     is_accelerate_available,
     is_apex_available,
+    is_aqlm_available,
     is_auto_awq_available,
     is_auto_gptq_available,
     is_bitsandbytes_available,
@@ -457,6 +459,20 @@ def require_torch_sdpa(test_case):
     These tests are skipped when requirements are not met (torch version).
     """
     return unittest.skipUnless(is_torch_sdpa_available(), "test requires PyTorch SDPA")(test_case)
+
+
+def require_read_token(fn):
+    """
+    A decorator that loads the HF token for tests that require to load gated models.
+    """
+    token = os.getenv("HF_HUB_READ_TOKEN")
+
+    @wraps(fn)
+    def _inner(*args, **kwargs):
+        with patch("huggingface_hub.utils._headers.get_token", return_value=token):
+            return fn(*args, **kwargs)
+
+    return _inner
 
 
 def require_peft(test_case):
@@ -956,11 +972,26 @@ def require_apex(test_case):
     return unittest.skipUnless(is_apex_available(), "test requires apex")(test_case)
 
 
+def require_aqlm(test_case):
+    """
+    Decorator marking a test that requires aqlm
+    """
+    return unittest.skipUnless(is_aqlm_available(), "test requires aqlm")(test_case)
+
+
 def require_bitsandbytes(test_case):
     """
-    Decorator for bits and bytes (bnb) dependency
+    Decorator marking a test that requires the bitsandbytes library. Will be skipped when the library or its hard dependency torch is not installed.
     """
-    return unittest.skipUnless(is_bitsandbytes_available(), "test requires bnb")(test_case)
+    if is_bitsandbytes_available() and is_torch_available():
+        try:
+            import pytest
+
+            return pytest.mark.bitsandbytes(test_case)
+        except ImportError:
+            return test_case
+    else:
+        return unittest.skip("test requires bitsandbytes and torch")(test_case)
 
 
 def require_optimum(test_case):
@@ -1309,7 +1340,7 @@ def LoggingLevel(level):
 
     ```python
     with LoggingLevel(logging.INFO):
-        AutoModel.from_pretrained("gpt2")  # calls logger.info() several times
+        AutoModel.from_pretrained("openai-community/gpt2")  # calls logger.info() several times
     ```
     """
     orig_level = transformers_logging.get_verbosity()
@@ -1595,7 +1626,7 @@ class TestCasePlus(unittest.TestCase):
         Example:
 
         ```
-        one_liner_str = 'from transformers import AutoModel; AutoModel.from_pretrained("t5-large")'
+        one_liner_str = 'from transformers import AutoModel; AutoModel.from_pretrained("google-t5/t5-large")'
         max_rss = self.python_one_liner_max_rss(one_liner_str)
         ```
         """
