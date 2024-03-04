@@ -262,6 +262,7 @@ class FlaxModelTesterMixin:
             fx_outputs[fx_nans] = 0
             pt_outputs[pt_nans] = 0
             fx_outputs[pt_nans] = 0
+
             max_diff = np.amax(np.abs(fx_outputs - pt_outputs))
             self.assertLessEqual(
                 max_diff, tol, f"{name}: Difference between PyTorch and Flax is {max_diff} (>= {tol})."

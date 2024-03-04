@@ -55,7 +55,6 @@ class FlaxLlamaModelTester:
         max_position_embeddings=512,
         window_size=7,
         initializer_range=0.02,
-        output_attentions=True,
     ):
         self.parent = parent
         self.batch_size = batch_size
