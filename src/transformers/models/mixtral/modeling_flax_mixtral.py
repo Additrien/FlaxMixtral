@@ -293,8 +293,9 @@ class FlaxMixtralAttention(nn.Module):
         self.k_proj = nn.Dense(self.num_key_value_heads * self.head_dim, use_bias=False, dtype=self.dtype)
         self.v_proj = nn.Dense(self.num_key_value_heads * self.head_dim, use_bias=False, dtype=self.dtype)
         self.o_proj = nn.Dense(self.hidden_size, use_bias=False, dtype=self.dtype)
-        casual_mask = make_causal_mask(jnp.ones((1, config.max_position_embeddings), dtype="bool"), dtype="bool")
-        self.causal_mask = jnp.triu(casual_mask, k=-config.sliding_window)
+        # casual_mask = make_causal_mask(jnp.ones((1, config.max_position_embeddings), dtype="bool"), dtype="bool")
+        # self.causal_mask = jnp.triu(casual_mask, k=-config.sliding_window)
+        # print(type(self.causal_mask), self.causal_mask.shape)
         self.rotary_emb = FlaxMixtralRotaryEmbedding(config, dtype=self.dtype)
 
     def _split_heads(self, hidden_states, num_heads):
@@ -339,6 +340,7 @@ class FlaxMixtralAttention(nn.Module):
     def __call__(
         self,
         hidden_states: jnp.ndarray,
+        causal_mask: jnp.ndarray,
         attention_mask: Optional[jnp.ndarray] = None,
         position_ids: Optional[jnp.ndarray] = None,
         deterministic: bool = True,
@@ -359,10 +361,10 @@ class FlaxMixtralAttention(nn.Module):
             mask_shift = self.variables["cache"]["cache_index"]
             max_decoder_length = self.variables["cache"]["cached_key"].shape[1]
             causal_mask = lax.dynamic_slice(
-                self.causal_mask, (0, 0, mask_shift, 0), (1, 1, query_length, max_decoder_length)
+                causal_mask, (0, 0, mask_shift, 0), (1, 1, query_length, max_decoder_length)
             )
         else:
-            causal_mask = self.causal_mask[:, :, :query_length, :key_length]
+            causal_mask = causal_mask[:, :, :query_length, :key_length]
         batch_size = hidden_states.shape[0]
         causal_mask = jnp.broadcast_to(causal_mask, (batch_size,) + causal_mask.shape[1:])
         attention_mask = jnp.broadcast_to(jnp.expand_dims(attention_mask, axis=(-3, -2)), causal_mask.shape)
@@ -521,6 +523,7 @@ class FlaxMixtralDecoderLayer(nn.Module):
     def __call__(
         self,
         hidden_states,
+        causal_mask,
         attention_mask=None,
         position_ids=None,
         deterministic: bool = True,
@@ -532,6 +535,7 @@ class FlaxMixtralDecoderLayer(nn.Module):
 
         outputs = self.self_attn(
             hidden_states,
+            causal_mask=causal_mask,
             attention_mask=attention_mask,
             position_ids=position_ids,
             deterministic=deterministic,
@@ -692,6 +696,8 @@ class FlaxMixtralLayerCollection(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
+        casual_mask = make_causal_mask(jnp.ones((1, self.config.max_position_embeddings), dtype="bool"), dtype="bool")
+        self.causal_mask = jnp.triu(casual_mask, k=-self.config.sliding_window)
         self.blocks = [
             FlaxMixtralDecoderLayer(self.config, dtype=self.dtype, name=str(i))
             for i in range(self.config.num_hidden_layers)
@@ -711,12 +717,13 @@ class FlaxMixtralLayerCollection(nn.Module):
         all_attentions = () if output_attentions else None
         all_hidden_states = () if output_hidden_states else None
         all_router_logits = () if self.config.output_router_logits else None
-
+        print("Test new causal mask")
         for block in self.blocks:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
             layer_outputs = block(
                 hidden_states,
+                causal_mask=self.causal_mask,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 deterministic=deterministic,
