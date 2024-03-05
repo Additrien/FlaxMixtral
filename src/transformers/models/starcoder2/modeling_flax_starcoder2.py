@@ -124,7 +124,7 @@ STARCODER2_INPUTS_DOCSTRING = r"""
 
 """
 
-
+# Copied from transformers.models.llama.modeling_flax_llama.create_sinusoidal_positions
 def create_sinusoidal_positions(num_pos, dim):
     inv_freq = 1.0 / (10000 ** (np.arange(0, dim, 2) / dim))
     freqs = np.einsum("i , j -> i j", np.arange(num_pos), inv_freq).astype("float32")
@@ -134,6 +134,7 @@ def create_sinusoidal_positions(num_pos, dim):
     return jnp.array(out[:, :, :num_pos])
 
 
+# Copied from transformers.models.llama.modeling_flax_llama.apply_rotary_pos_emb
 def apply_rotary_pos_emb(tensor, sin_pos, cos_pos):
     return (tensor * cos_pos) + (rotate_half(tensor) * sin_pos)
 
@@ -179,7 +180,7 @@ class FlaxStarcoder2MLP(nn.module):
         self.act = ACT2FN[self.config.hidden_act]
         self.residual_dropout = nn.Dropout(rate=self.config.hidden_dropout_prob)
 
-    def __call__(self, hidden_states, deterministic=True):
+    def __call__(self, hidden_states):
         hidden_states = self.c_fc(hidden_states)
         hidden_states = self.act(hidden_states)
         hidden_states = self.c_proj(hidden_states)

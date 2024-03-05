@@ -1,4 +1,4 @@
-# Copyright 2020 The HuggingFace Team. All rights reserved.
+# Copyright 2024 BigCode and The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,24 +13,31 @@
 # limitations under the License.
 from typing import TYPE_CHECKING
 
-from ...utils import  _LazyModule, OptionalDependencyNotAvailable, is_tokenizers_available
-from ...utils import is_flax_available
-
-
+from ...utils import (
+    OptionalDependencyNotAvailable,
+    _LazyModule,
+    is_flax_available,
+    is_torch_available,
+)
 
 
 _import_structure = {
     "configuration_starcoder2": ["STARCODER2_PRETRAINED_CONFIG_ARCHIVE_MAP", "Starcoder2Config"],
-    "tokenization_starcoder2": ["Starcoder2Tokenizer"],
 }
 
+
 try:
-    if not is_tokenizers_available():
+    if not is_torch_available():
         raise OptionalDependencyNotAvailable()
 except OptionalDependencyNotAvailable:
     pass
 else:
-    _import_structure["tokenization_starcoder2_fast"] = ["Starcoder2TokenizerFast"]
+    _import_structure["modeling_starcoder2"] = [
+        "Starcoder2ForCausalLM",
+        "Starcoder2Model",
+        "Starcoder2PreTrainedModel",
+        "Starcoder2ForSequenceClassification",
+    ]
 
 try:
     if not is_flax_available():
@@ -39,31 +46,27 @@ except OptionalDependencyNotAvailable:
     pass
 else:
     _import_structure["modeling_flax_starcoder2"] = [
-        "FlaxStarcoder2ForMaskedLM",
         "FlaxStarcoder2ForCausalLM",
-        "FlaxStarcoder2ForMultipleChoice",
-        "FlaxStarcoder2ForQuestionAnswering",
-        "FlaxStarcoder2ForSequenceClassification",
-        "FlaxStarcoder2ForTokenClassification",
-        "FlaxStarcoder2Layer",
         "FlaxStarcoder2Model",
         "FlaxStarcoder2PreTrainedModel",
     ]
 
 
-
-
 if TYPE_CHECKING:
     from .configuration_starcoder2 import STARCODER2_PRETRAINED_CONFIG_ARCHIVE_MAP, Starcoder2Config
-    from .tokenization_starcoder2 import Starcoder2Tokenizer
 
     try:
-        if not is_tokenizers_available():
+        if not is_torch_available():
             raise OptionalDependencyNotAvailable()
     except OptionalDependencyNotAvailable:
         pass
     else:
-        from .tokenization_starcoder2_fast import Starcoder2TokenizerFast
+        from .modeling_starcoder2 import (
+            Starcoder2ForCausalLM,
+            Starcoder2ForSequenceClassification,
+            Starcoder2Model,
+            Starcoder2PreTrainedModel,
+        )
 
     try:
         if not is_flax_available():
@@ -71,19 +74,11 @@ if TYPE_CHECKING:
     except OptionalDependencyNotAvailable:
         pass
     else:
-        from .modeling_starcoder2 import (
-            FlaxStarcoder2ForMaskedLM,
+        from .modeling_flax_starcoder2 import (
             FlaxStarcoder2ForCausalLM,
-            FlaxStarcoder2ForMultipleChoice,
-            FlaxStarcoder2ForQuestionAnswering,
-            FlaxStarcoder2ForSequenceClassification,
-            FlaxStarcoder2ForTokenClassification,
-            FlaxStarcoder2Layer,
             FlaxStarcoder2Model,
             FlaxStarcoder2PreTrainedModel,
         )
-
-
 
 else:
     import sys
