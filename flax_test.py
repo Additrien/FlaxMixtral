@@ -1,12 +1,24 @@
 import numpy as np
 import time
 from jax import jit
+import jax.tools.colab_tpu
 from transformers import AutoTokenizer, FlaxMixtralForCausalLM, MixtralConfig
 
 def jax_forward(model, inputs):
     outputs = model(**inputs)
 
 if __name__ == "__main__":
+
+    jax.tools.colab_tpu.setup_tpu()
+
+    num_devices = jax.device_count()
+    device_type = jax.devices()[0].device_kind
+
+    print(f"Found {num_devices} JAX devices of type {device_type}.")
+    assert (
+        "TPU" in device_type,
+        "Available device is not a TPU, please select TPU from Runtime > Change runtime type > Hardware accelerator"
+    )
 
     model_path = "mistralai/Mixtral-8x7B-v0.1"
 
