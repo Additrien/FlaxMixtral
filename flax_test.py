@@ -25,6 +25,7 @@ if __name__ == "__main__":
 
     seq = []
     for i in range(loops):
+        print(i)
         time1 = time.time()
         jax_forward(model, inputs)
         time2 = time.time()
