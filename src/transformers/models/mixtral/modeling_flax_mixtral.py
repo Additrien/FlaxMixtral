@@ -18,17 +18,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Flax Mixtral model."""
+import functools
 from typing import Optional, Tuple
 
 import flax.linen as nn
 import jax
+from jax.experimental.shard_map import shard_map
 import jax.numpy as jnp
+from jax.sharding import PartitionSpec as P
+
 import numpy as np
 from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from flax.linen import combine_masks, make_causal_mask
 from flax.linen.attention import dot_product_attention_weights
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import lax
+from jax.lax import with_sharding_constraint as pjit_sharding_constraint
 
 from ...modeling_flax_outputs import (
     FlaxCausalLMOutput,
@@ -227,6 +232,13 @@ def apply_rotary_pos_emb(tensor, sin_pos, cos_pos):
     return (tensor * cos_pos) + (rotate_half(tensor) * sin_pos)
 
 
+def with_sharding_constraint(x, constraint):
+    if jax.experimental.maps.thread_resources.env.physical_mesh.empty:
+        return x
+    else:
+        return pjit_sharding_constraint(x, constraint)
+
+
 # Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaRMSNorm with Llama->Mixtral
 class FlaxMixtralRMSNorm(nn.Module):
     config: MixtralConfig
@@ -258,6 +270,18 @@ class FlaxMixtralRotaryEmbedding(nn.Module):
     def __call__(self, key, query, position_ids):
         sincos = self.sincos[position_ids]
         sin_pos, cos_pos = jnp.split(sincos, 2, axis=-1)
+
+        # @functools.partial(
+        #     shard_map,
+        #     mesh=self.mesh,
+        #     in_specs=(P(None, "data", None), P("data", None), P("data", None)),
+        #     out_specs=P(None, "data", None),
+        # )
+        # def sharded_apply_rotary_pos_emb(x, sin_pos, cos_pos):  
+        #     return apply_rotary_pos_emb(x, sin_pos, cos_pos) 
+
+        # key = sharded_apply_rotary_pos_emb(key, sin_pos, cos_pos)
+        # query = sharded_apply_rotary_pos_emb(query, sin_pos, cos_pos)
 
         key = apply_rotary_pos_emb(key, sin_pos, cos_pos)
         query = apply_rotary_pos_emb(query, sin_pos, cos_pos)
@@ -297,7 +321,11 @@ class FlaxMixtralAttention(nn.Module):
         self.rotary_emb = FlaxMixtralRotaryEmbedding(config, dtype=self.dtype)
 
     def _split_heads(self, hidden_states, num_heads):
-        return hidden_states.reshape(hidden_states.shape[:2] + (num_heads, self.head_dim))
+        @functools.partial(shard_map, mesh=self.mesh, in_specs=P(None, "data"), out_specs=P(None, "data", "model"))
+        def sharded_split_heads(hidden_states):
+            return hidden_states.reshape(hidden_states.shape[:2] + (num_heads, self.head_dim))
+        return sharded_split_heads(hidden_states)
+
 
     def _merge_heads(self, hidden_states):
         return hidden_states.reshape(hidden_states.shape[:2] + (self.hidden_size,))
@@ -338,7 +366,6 @@ class FlaxMixtralAttention(nn.Module):
     def __call__(
         self,
         hidden_states: jnp.ndarray,
-        causal_mask: jnp.ndarray,
         attention_mask: Optional[jnp.ndarray] = None,
         position_ids: Optional[jnp.ndarray] = None,
         deterministic: bool = True,
@@ -348,6 +375,11 @@ class FlaxMixtralAttention(nn.Module):
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
+
+        if self.config.sharding:
+            query_states = with_sharding_constraint(query_states, P(self.data_axis, None, "model", None)) 
+            key_states = with_sharding_constraint(key_states, P(self.data_axis, None, "model", None)) 
+            value_states = with_sharding_constraint(value_states, P(self.data_axis, None, "model", None)) 
 
         query_states = self._split_heads(query_states, self.num_heads)
         key_states = self._split_heads(key_states, self.num_key_value_heads)
@@ -359,10 +391,11 @@ class FlaxMixtralAttention(nn.Module):
             mask_shift = self.variables["cache"]["cache_index"]
             max_decoder_length = self.variables["cache"]["cached_key"].shape[1]
             causal_mask = lax.dynamic_slice(
-                causal_mask, (0, 0, mask_shift, 0), (1, 1, query_length, max_decoder_length)
+                self.causal_mask, (0, 0, mask_shift, 0), (1, 1, query_length, max_decoder_length)
             )
+            
         else:
-            causal_mask = causal_mask[:, :, :query_length, :key_length]
+            causal_mask = self.causal_mask[:, :, :query_length, :key_length]
         batch_size = hidden_states.shape[0]
         causal_mask = jnp.broadcast_to(causal_mask, (batch_size,) + causal_mask.shape[1:])
         attention_mask = jnp.broadcast_to(jnp.expand_dims(attention_mask, axis=(-3, -2)), causal_mask.shape)
@@ -382,17 +415,32 @@ class FlaxMixtralAttention(nn.Module):
         )
         # usual dot product attention
         attention_dtype = jnp.float32 if self.attention_softmax_in_fp32 else self.dtype
-        attn_weights = dot_product_attention_weights(
-            query_states,
-            key_states,
-            bias=attention_bias,
-            deterministic=deterministic,
-            dropout_rate=self.config.attention_dropout,
-            dtype=attention_dtype,
+         
+        @functools.partial(
+            shard_map,
+            mesh=self.mesh, 
+            in_specs=(
+                P(None, "data", "model"),
+                P("data", "model", None), 
+            ),
+            out_specs=P(None, "data", "model"), 
         )
+        def sharded_attention_weights(query_states, key_states):
+            attn_weights = dot_product_attention_weights(
+                query_states,
+                key_states,
+                bias=attention_bias,
+                deterministic=deterministic,
+                dropout_rate=self.config.attention_dropout,
+                dtype=attention_dtype,
+            )   
 
-        if self.attention_softmax_in_fp32:
-            attn_weights = attn_weights.astype(self.dtype)
+            if self.attention_softmax_in_fp32:
+                attn_weights = attn_weights.astype(self.dtype)
+
+            return attn_weights
+
+        attn_weights = sharded_attention_weights(query_states, key_states)
 
         attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value_states)
         attn_output = self._merge_heads(attn_output)
@@ -433,28 +481,44 @@ class FlaxMixtralBlockSparesTop2MLPCollection(nn.Module):
     ):
         final_hidden_states = jnp.zeros(((batch_size * sequence_length) + 1, hidden_dim), dtype=hidden_states.dtype)
 
-        for expert_idx in range(self.config.num_local_experts):
-            selected_mask = expert_mask[expert_idx]
-            idx, top_x = jnp.nonzero(selected_mask, size=sequence_length, fill_value=-1)
+        @functools.partial( 
+            shard_map,
+            mesh=self.mesh, 
+            in_specs=(
+                P("data", None),
+                P(None), 
+                P(None),
+                P("model"),
+                P(None),
+                P(None),
+            ),
+            out_specs=P("data", "model"),
+        )
+        def sharded_expert_computation(expert_mask, hidden_states, routing_weights, batch_size, sequence_length, hidden_dim):
+            for expert_idx in range(self.config.num_local_experts):
+                selected_mask = expert_mask[expert_idx]
+                idx, top_x = jnp.nonzero(selected_mask, size=sequence_length, fill_value=-1)
 
-            if top_x.shape[0] == 0:
-                continue
+                if top_x.shape[0] == 0:
+                    continue
 
-            def expert(layer, input_hidden_states):
-                current_state = hidden_states[top_x]
-                current_hidden_states = layer.experts[expert_idx](current_state) * routing_weights[top_x, idx, None]
+                def expert(layer, input_hidden_states):
+                    current_state = hidden_states[top_x]
+                    current_hidden_states = layer.experts[expert_idx](current_state) * routing_weights[top_x, idx, None]
 
-                input_hidden_states = input_hidden_states.at[top_x].set(
-                    current_hidden_states + input_hidden_states[top_x]
-                )
-                return input_hidden_states
+                    input_hidden_states = input_hidden_states.at[top_x].set(
+                        current_hidden_states + input_hidden_states[top_x]
+                    )
+                    return input_hidden_states
 
-            final_hidden_states = expert(self, final_hidden_states)
+                final_hidden_states = expert(self, final_hidden_states)
 
-        final_hidden_states = final_hidden_states[:-1]
-        final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
-
-        return final_hidden_states
+            final_hidden_states = final_hidden_states[:-1]
+            final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+            return final_hidden_states
+        
+        updated_hidden_states = sharded_expert_computation(expert_mask, hidden_states, routing_weights, batch_size, sequence_length, hidden_dim)
+        return updated_hidden_states
 
 
 class FlaxMixtralSparseMoeBlock(nn.Module):
@@ -487,11 +551,9 @@ class FlaxMixtralSparseMoeBlock(nn.Module):
         routing_weights = jax.nn.softmax(router_logits, axis=1)
 
         routing_weights, selected_experts = jax.lax.top_k(routing_weights, self.config.num_experts_per_tok)
-
         routing_weights /= jnp.sum(routing_weights, axis=-1, keepdims=True)
         # we cast back to the input dtype
         routing_weights = routing_weights.astype(hidden_states.dtype)
-
         # One hot encode the selected experts to create an expert mask
         # this will be used to easily index which expert is going to be sollicitated
         expert_mask = jax.nn.one_hot(selected_experts, num_classes=self.config.num_local_experts).transpose(2, 1, 0)
@@ -521,7 +583,6 @@ class FlaxMixtralDecoderLayer(nn.Module):
     def __call__(
         self,
         hidden_states,
-        causal_mask,
         attention_mask=None,
         position_ids=None,
         deterministic: bool = True,
@@ -532,7 +593,6 @@ class FlaxMixtralDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
         outputs = self.self_attn(
             hidden_states,
-            causal_mask=causal_mask,
             attention_mask=attention_mask,
             position_ids=position_ids,
             deterministic=deterministic,
@@ -693,8 +753,6 @@ class FlaxMixtralLayerCollection(nn.Module):
     dtype: jnp.dtype = jnp.float32
 
     def setup(self):
-        casual_mask = make_causal_mask(jnp.ones((1, self.config.max_position_embeddings), dtype="bool"), dtype="bool")
-        self.causal_mask = jnp.triu(casual_mask, k=-self.config.sliding_window)
         self.blocks = [
             FlaxMixtralDecoderLayer(self.config, dtype=self.dtype, name=str(i))
             for i in range(self.config.num_hidden_layers)
@@ -719,7 +777,6 @@ class FlaxMixtralLayerCollection(nn.Module):
                 all_hidden_states += (hidden_states,)
             layer_outputs = block(
                 hidden_states,
-                causal_mask=self.causal_mask,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 deterministic=deterministic,
