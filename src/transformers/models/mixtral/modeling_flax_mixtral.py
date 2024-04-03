@@ -18,7 +18,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Flax Mixtral model."""
-from typing import Optional, Tuple
+import dataclasses
+import functools
+from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
 
 import flax.linen as nn
 import jax
@@ -26,9 +28,13 @@ import jax.numpy as jnp
 import numpy as np
 from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from flax.linen import combine_masks, make_causal_mask
+from flax.linen import partitioning as nn_partitioning
 from flax.linen.attention import dot_product_attention_weights
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import lax
+from jax.experimental import mesh_utils
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from t5x import partitioning as t5x_partitioning
 
 from ...modeling_flax_outputs import (
     FlaxCausalLMOutput,
@@ -130,6 +136,10 @@ MIXTRAL_INPUTS_DOCSTRING = r"""
 """
 
 
+param_with_axes = nn_partitioning.param_with_axes
+with_sharding_constraint = nn_partitioning.with_sharding_constraint
+
+
 def load_balancing_loss_func(gate_logits, num_experts=None, top_k=2, attention_mask=None) -> float:
     r"""
     Computes auxiliary load balancing loss as in Switch Transformer - implemented in Flax.
@@ -206,6 +216,7 @@ def load_balancing_loss_func(gate_logits, num_experts=None, top_k=2, attention_m
     return overall_loss * num_experts
 
 
+@jax.jit
 def create_sinusoidal_positions(num_pos, dim):
     inv_freq = 1.0 / (10000 ** (np.arange(0, dim, 2) / dim))
     freqs = np.einsum("i , j -> i j", np.arange(num_pos), inv_freq).astype("float32")
@@ -215,6 +226,7 @@ def create_sinusoidal_positions(num_pos, dim):
     return jnp.array(out[:, :, :num_pos])
 
 
+@jax.jit
 def rotate_half(tensor):
     """Rotates half the hidden dims of the input."""
     rotate_half_tensor = jnp.concatenate(
@@ -223,11 +235,163 @@ def rotate_half(tensor):
     return rotate_half_tensor
 
 
+@jax.jit
 def apply_rotary_pos_emb(tensor, sin_pos, cos_pos):
     return (tensor * cos_pos) + (rotate_half(tensor) * sin_pos)
 
 
-# Copied from transformers.models.llama.modeling_flax_llama.FlaxLlamaRMSNorm with Llama->Mixtral
+# Type annotations
+Array = jnp.ndarray
+DType = jnp.dtype
+PRNGKey = jnp.ndarray
+Shape = Sequence[int]
+Activation = Callable[..., Array]
+# Parameter initializers.
+Initializer = Callable[[PRNGKey, Shape, DType], Array]
+default_embed_init = nn.initializers.variance_scaling(
+    1.0, 'fan_in', 'normal', out_axis=0
+)
+
+
+# copied from https://github.com/google-research/t5x/blob/main/t5x/examples/t5/layers.py#L349
+def _normalize_axes(axes: Iterable[int], ndim: int) -> Tuple[int]:
+  # A tuple by convention. len(axes_tuple) then also gives the rank efficiently.
+  return tuple([ax if ax >= 0 else ndim + ax for ax in axes])
+
+
+# copied from https://github.com/google-research/t5x/blob/main/t5x/examples/t5/layers.py#L354
+def _canonicalize_tuple(x):
+  if isinstance(x, Iterable):
+    return tuple(x)
+  else:
+    return (x,)
+
+
+# copied from https://github.com/google-research/t5x/blob/main/t5x/examples/t5/layers.py#L364
+class DenseGeneral(nn.Module):
+  """A linear transformation (without bias) with flexible axes.
+
+  Attributes:
+    features: tuple with numbers of output features.
+    axis: tuple with axes to apply the transformation on.
+    dtype: the dtype of the computation (default: float32).
+    kernel_init: initializer function for the weight matrix.
+  """
+
+  features: Union[Iterable[int], int]
+  axis: Union[Iterable[int], int] = -1
+  dtype: DType = jnp.float32
+  kernel_init: Initializer = nn.initializers.variance_scaling(
+      1.0, 'fan_in', 'truncated_normal'
+  )
+  kernel_axes: Tuple[str, ...] = ()
+
+  @nn.compact
+  def __call__(self, inputs: Array) -> Array:
+    """Applies a linear transformation to the inputs along multiple dimensions.
+
+    Args:
+      inputs: The nd-array to be transformed.
+
+    Returns:
+      The transformed input.
+    """
+    features = _canonicalize_tuple(self.features)
+    axis = _canonicalize_tuple(self.axis)
+
+    inputs = jnp.asarray(inputs, self.dtype)
+    axis = _normalize_axes(axis, inputs.ndim)
+
+    kernel_shape = tuple([inputs.shape[ax] for ax in axis]) + features
+    kernel_param_shape = (
+        np.prod([inputs.shape[ax] for ax in axis]),
+        np.prod(features),
+    )
+    kernel = param_with_axes(
+        'kernel',
+        self.kernel_init,
+        kernel_param_shape,
+        jnp.float32,
+        axes=self.kernel_axes,
+    )
+    kernel = jnp.asarray(kernel, self.dtype)
+    kernel = jnp.reshape(kernel, kernel_shape)
+
+    contract_ind = tuple(range(0, len(axis)))
+    return lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
+
+
+# copied from https://github.com/google-research/t5x/blob/main/t5x/examples/t5/layers.py#L490C1-L558C1
+class Embed(nn.Module):
+  """A parameterized function from integers [0, n) to d-dimensional vectors.
+
+  Attributes:
+    num_embeddings: number of embeddings.
+    features: number of feature dimensions for each embedding.
+    dtype: the dtype of the embedding vectors (default: float32).
+    embedding_init: embedding initializer.
+    one_hot: performs the gather with a one-hot contraction rather than a true
+      gather. This is currently needed for SPMD partitioning.
+  """
+
+  num_embeddings: int
+  features: int
+  cast_input_dtype: Optional[DType] = None
+  dtype: DType = jnp.float32
+  attend_dtype: Optional[DType] = None
+  embedding_init: Initializer = default_embed_init
+  one_hot: bool = False
+  embedding: Array = dataclasses.field(init=False)
+
+  def setup(self):
+    self.embedding = param_with_axes(
+        'embedding',
+        self.embedding_init,
+        (self.num_embeddings, self.features),
+        jnp.float32,
+        axes=('vocab', 'embed'),
+    )
+
+  def __call__(self, inputs: Array) -> Array:
+    """Embeds the inputs along the last dimension.
+
+    Args:
+      inputs: input data, all dimensions are considered batch dimensions.
+
+    Returns:
+      Output which is embedded input data.  The output shape follows the input,
+      with an additional `features` dimension appended.
+    """
+    if self.cast_input_dtype:
+      inputs = inputs.astype(self.cast_input_dtype)
+    if not jnp.issubdtype(inputs.dtype, jnp.integer):
+      raise ValueError('Input type must be an integer or unsigned integer.')
+    if self.one_hot:
+      iota = lax.iota(jnp.int32, self.num_embeddings)
+      one_hot = jnp.array(inputs[..., jnp.newaxis] == iota, dtype=self.dtype)
+      output = jnp.dot(one_hot, jnp.asarray(self.embedding, self.dtype))
+    else:
+      output = jnp.asarray(self.embedding, self.dtype)[inputs]
+      output = with_sharding_constraint(output, ('batch', 'length', 'embed'))
+    return output
+
+  def attend(self, query: Array) -> Array:
+    """Attend over the embedding using a query array.
+
+    Args:
+      query: array with last dimension equal the feature depth `features` of the
+        embedding.
+
+    Returns:
+      An array with final dim `num_embeddings` corresponding to the batched
+      inner-product of the array of query vectors against each embedding.
+      Commonly used for weight-sharing between embeddings and logit transform
+      in NLP models.
+    """
+    dtype = self.attend_dtype if self.attend_dtype is not None else self.dtype
+    return jnp.dot(query, jnp.asarray(self.embedding, dtype).T)
+
+
 class FlaxMixtralRMSNorm(nn.Module):
     config: MixtralConfig
     dtype: jnp.dtype = jnp.float32
@@ -235,7 +399,14 @@ class FlaxMixtralRMSNorm(nn.Module):
     def setup(self):
         self.epsilon = self.config.rms_norm_eps
         self.weight = self.param("weight", lambda _, shape: jnp.ones(shape), self.config.hidden_size)
-
+        self.weight = param_with_axes(
+            "weigth",
+            nn.with_logical_partitioning(
+                lambda _, shape: jnp.ones(shape), ("embed",)
+            ),
+            self.config.hidden_size,
+            axes = ("embed",)
+        )
     def __call__(self, hidden_states):
         variance = jnp.asarray(hidden_states, dtype=jnp.float32)
         variance = jnp.power(variance, 2)
@@ -272,6 +443,7 @@ class FlaxMixtralRotaryEmbedding(nn.Module):
 class FlaxMixtralAttention(nn.Module):
     config: MixtralConfig
     dtype: jnp.dtype = jnp.float32
+    kernel_init: Any = nn.initializers.xavier_uniform()
 
     def setup(self):
         config = self.config
@@ -288,10 +460,43 @@ class FlaxMixtralAttention(nn.Module):
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
                 f" and `num_heads`: {self.num_heads})."
             )
-        self.q_proj = nn.Dense(self.num_heads * self.head_dim, use_bias=False, dtype=self.dtype)
-        self.k_proj = nn.Dense(self.num_key_value_heads * self.head_dim, use_bias=False, dtype=self.dtype)
-        self.v_proj = nn.Dense(self.num_key_value_heads * self.head_dim, use_bias=False, dtype=self.dtype)
-        self.o_proj = nn.Dense(self.hidden_size, use_bias=False, dtype=self.dtype)
+
+        self.q_proj = DenseGeneral(
+            self.num_heads * self.head_dim,
+            dtype=self.dtype,
+            kernel_init=nn.with_logical_partitioning(
+                self.kernel_init, ("embed", "joined_kv")
+            ),
+            kernel_axes=("embed", "joined_kv"),
+            name="q_proj",
+        )
+        self.k_proj = DenseGeneral(
+            self.num_key_value_heads * self.head_dim,
+            dtype=self.dtype,
+            kernel_init=nn.with_logical_partitioning(
+                self.kernel_init, ("embed", "joined_kv")
+            ),
+            kernel_axes=("embed", "joined_kv"),
+            name="k_proj",
+        )
+        self.v_proj = DenseGeneral(
+            self.num_key_value_heads * self.head_dim,
+            dtype=self.dtype,
+            kernel_init=nn.with_logical_partitioning(
+                self.kernel_init, ("embed", "joined_kv")
+            ),
+            kernel_axes=("embed", "joined_kv"),
+            name="v_proj",
+        )
+        self.o_proj = DenseGeneral(
+            self.hidden_size,
+            dtype=self.dtype,
+            kernel_init=nn.with_logical_partitioning(
+                self.kernel_init, ("joined_kv", "embed")
+            ),
+            kernel_axes=("joined_kv", "embed"),
+            name="o_proj",
+        )
         casual_mask = make_causal_mask(jnp.ones((1, config.max_position_embeddings), dtype="bool"), dtype="bool")
         self.causal_mask = jnp.triu(casual_mask, k=-config.sliding_window)
         self.rotary_emb = FlaxMixtralRotaryEmbedding(config, dtype=self.dtype)
@@ -345,6 +550,9 @@ class FlaxMixtralAttention(nn.Module):
         output_attentions: bool = False,
         init_cache: bool = False,
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        hidden_states = with_sharding_constraint(
+            hidden_states, ("batch", "length", "embed")
+        )
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
@@ -352,6 +560,10 @@ class FlaxMixtralAttention(nn.Module):
         query_states = self._split_heads(query_states, self.num_heads)
         key_states = self._split_heads(key_states, self.num_key_value_heads)
         value_states = self._split_heads(value_states, self.num_key_value_heads)
+
+        query_states = with_sharding_constraint(
+            query_states, ("batch", "heads", "length", "kv")
+        )
 
         key_states, query_states = self.rotary_emb(key_states, query_states, position_ids)
         query_length, key_length = query_states.shape[1], key_states.shape[1]
@@ -372,8 +584,23 @@ class FlaxMixtralAttention(nn.Module):
             key_states, value_states, attention_mask = self._concatenate_to_cache(
                 key_states, value_states, query_states, attention_mask
             )
+
+        key_states = with_sharding_constraint(
+            key_states, ("batch", "heads", "kv_length", "kv")
+        )
+        value_states = with_sharding_constraint(
+            value_states, ("batch", "heads", "kv_length", "kv")
+        )
+
         key_states = jnp.repeat(key_states, self.num_key_value_groups, axis=2)
         value_states = jnp.repeat(value_states, self.num_key_value_groups, axis=2)
+
+        key_states = with_sharding_constraint(
+            key_states, ("batch", "heads", "kv_length", "kv")
+        )
+        value_states = with_sharding_constraint(
+            value_states, ("batch", "heads", "kv_length", "kv")
+        )
 
         attention_bias = lax.select(
             attention_mask > 0,
@@ -394,9 +621,19 @@ class FlaxMixtralAttention(nn.Module):
         if self.attention_softmax_in_fp32:
             attn_weights = attn_weights.astype(self.dtype)
 
+        attn_weights = with_sharding_constraint(
+            attn_weights, ("batch", "heads", "length", "kv_length")
+        )
+
         attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, value_states)
+        attn_output = with_sharding_constraint(
+            attn_output, ("batch", "heads", "length", "kv")
+        )
         attn_output = self._merge_heads(attn_output)
         attn_output = self.o_proj(attn_output)
+        attn_output = with_sharding_constraint(
+            attn_output, ("batch", "heads", "length", "kv")
+        )
         outputs = (attn_output, attn_weights) if output_attentions else (attn_output,)
         return outputs
 
@@ -404,16 +641,47 @@ class FlaxMixtralAttention(nn.Module):
 class FlaxMixtralBLockSparseTop2MLP(nn.Module):
     config: MixtralConfig
     dtype: jnp.dtype = jnp.float32
+    kernel_init: Any = nn.initializers.xavier_uniform()
 
     def setup(self) -> None:
-        self.w1 = nn.Dense(self.config.intermediate_size, use_bias=False, dtype=self.dtype)
-        self.w2 = nn.Dense(self.config.hidden_size, use_bias=False, dtype=self.dtype)
-        self.w3 = nn.Dense(self.config.intermediate_size, use_bias=False, dtype=self.dtype)
+        self.w1 = DenseGeneral(
+            self.config.hidden_size, 
+            dtype=self.dtype,
+            kernel_init=nn.with_logical_partitioning(
+                self.kernel_init, ("intermediate", "embed")
+            ),
+            kernel_axes=("intermediate", "embed"),
+            name="w1"    
+        )
+        self.w2 = DenseGeneral(
+            self.config.intermediate_size, 
+            dtype=self.dtype,
+            kernel_init=nn.with_logical_partitioning(
+                self.kernel_init, ("embed", "intermediate")
+            ),
+            kernel_axes=("embed", "intermediate"),
+            name="w2"    
+        )
+        self.w3 = DenseGeneral(
+            self.config.hidden_size, 
+            dtype=self.dtype,
+            kernel_init=nn.with_logical_partitioning(
+                self.kernel_init, ("intermediate", "embed")
+            ),
+            kernel_axes=("intermediate", "embed"),
+            name="w3"    
+        )
+
         self.act_fn = ACT2FN[self.config.hidden_act]
 
     def __call__(self, hidden_states):
-        current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
-        current_hidden_states = self.w2(current_hidden_states)
+        hidden_states = with_sharding_constraint(hidden_states, ("batch", "length", "embed"))
+        current_hidden_states = self.act_fn(
+            with_sharding_constraint(
+                self.w1(hidden_states), ("batch", "length", "intermediate")
+            )
+        ) * with_sharding_constraint(self.w3(hidden_states), ("batch", "length", "intermediate"))
+        current_hidden_states = with_sharding_constraint(self.w2(current_hidden_states), ("batch", "length", "embed"))
 
         return current_hidden_states
 
@@ -421,10 +689,11 @@ class FlaxMixtralBLockSparseTop2MLP(nn.Module):
 class FlaxMixtralBlockSparesTop2MLPCollection(nn.Module):
     config: MixtralConfig
     dtype: jnp.dtype = jnp.float32
+    kernel_init = nn.initializers.xavier_uniform()
 
     def setup(self) -> None:
         self.experts = [
-            FlaxMixtralBLockSparseTop2MLP(config=self.config, dtype=self.dtype, name=str(i))
+            FlaxMixtralBLockSparseTop2MLP(config=self.config, dtype=self.dtype, kernel_init=self.kernel_init, name=str(i))
             for i in range(self.config.num_local_experts)
         ]
 
@@ -471,10 +740,19 @@ class FlaxMixtralSparseMoeBlock(nn.Module):
 
     config: MixtralConfig
     dtype: jnp.dtype = jnp.float32
+    kernel_init = nn.initializers.xavier_uniform()
 
     def setup(self) -> None:
-        self.gate = nn.Dense(self.config.num_local_experts, use_bias=False, dtype=self.dtype)
-        self.experts = FlaxMixtralBlockSparesTop2MLPCollection(config=self.config, dtype=self.dtype)
+        self.gate = DenseGeneral(
+            self.config.num_local_experts,
+            dtype=self.dtype,
+            kernel_init=nn.with_logical_partitioning(
+                self.kernel_init, ("mlp",),
+                kernel_axes=("mlp",),
+                name="gate"
+            )
+        )
+        self.experts = FlaxMixtralBlockSparesTop2MLPCollection(config=self.config, dtype=self.dtype, kernel_type=self.kernel_type)
 
     def __call__(
         self,
@@ -511,12 +789,13 @@ class FlaxMixtralSparseMoeBlock(nn.Module):
 class FlaxMixtralDecoderLayer(nn.Module):
     config: MixtralConfig
     dtype: jnp.dtype = jnp.float32
+    kernel_init: Any = nn.initializers.xavier_uniform()
 
     def setup(self):
-        self.self_attn = FlaxMixtralAttention(self.config, dtype=self.dtype)
-        self.block_sparse_moe = FlaxMixtralSparseMoeBlock(self.config, dtype=self.dtype)
-        self.input_layernorm = FlaxMixtralRMSNorm(self.config, dtype=self.dtype)
-        self.post_attention_layernorm = FlaxMixtralRMSNorm(self.config, dtype=self.dtype)
+        self.self_attn = FlaxMixtralAttention(self.config, dtype=self.dtype, kernel_init=self.kernel_init)
+        self.block_sparse_moe = FlaxMixtralSparseMoeBlock(self.config, dtype=self.dtype, kernel_init=self.kernel_init)
+        self.input_layernorm = FlaxMixtralRMSNorm(self.config, dtype=self.dtype, kernel_init=self.kernel_init)
+        self.post_attention_layernorm = FlaxMixtralRMSNorm(self.config, dtype=self.dtype, kernel_init=self.kernel_init)
 
     def __call__(
         self,
@@ -691,12 +970,13 @@ class FlaxMixtralPreTrainedModel(FlaxPreTrainedModel):
 class FlaxMixtralLayerCollection(nn.Module):
     config: MixtralConfig
     dtype: jnp.dtype = jnp.float32
+    kernel_init: Any = nn.initializers.xavier_uniform()
 
     def setup(self):
         casual_mask = make_causal_mask(jnp.ones((1, self.config.max_position_embeddings), dtype="bool"), dtype="bool")
         self.causal_mask = jnp.triu(casual_mask, k=-self.config.sliding_window)
         self.blocks = [
-            FlaxMixtralDecoderLayer(self.config, dtype=self.dtype, name=str(i))
+            FlaxMixtralDecoderLayer(self.config, dtype=self.dtype, kernel_init=self.kernel_init, name=str(i))
             for i in range(self.config.num_hidden_layers)
         ]
 
@@ -742,16 +1022,28 @@ class FlaxMixtralLayerCollection(nn.Module):
 class FlaxMixtralModule(nn.Module):
     config: MixtralConfig
     dtype: jnp.dtype = jnp.float32
+    kernel_init: Any = nn.initializers.xavier_uniform()
 
     def setup(self):
         self.hidden_size = self.config.hidden_size
         embedding_init = jax.nn.initializers.normal(stddev=self.config.initializer_range)
-        self.embed_tokens = nn.Embed(
-            self.config.vocab_size,
-            self.hidden_size,
-            embedding_init=embedding_init,
-            dtype=self.dtype,
+        # self.embed_tokens = nn.Embed(
+        #     self.config.vocab_size,
+        #     self.hidden_size,
+        #     embedding_init=embedding_init,
+        #     dtype=self.dtype,
+        # )   
+        self.embed_tokens = Embed(
+            num_embeddings=self.vocab_size,
+            features=self.config.hidden_size,
+            attend_dtype=self.dtype,
+            embedding_init=nn.with_logical_partitioning(
+                embedding_init, ("vocab","embed",),
+            ),
+            one_hot=True,
+            name="embed_tokens",
         )
+
         self.layers = FlaxMixtralLayerCollection(self.config, dtype=self.dtype)
         self.norm = FlaxMixtralRMSNorm(self.config, dtype=self.dtype)
 
@@ -829,6 +1121,127 @@ append_call_sample_docstring(
 class FlaxMixtralForCausalLMModule(nn.Module):
     config: MixtralConfig
     dtype: jnp.dtype = jnp.float32
+    kernel_init: Any = nn.initializers.xavier_uniform()
+    sharded: Optional[bool] = len(jax.devices()) > 1 and len(jax.devices()) % 2 == 0
+
+    @staticmethod
+    def mesh_sharding(pspec: PartitionSpec | None, mesh: Mesh | None) -> NamedSharding:
+        if mesh is None:
+            mesh = Mesh(jax.devices(), (None,))
+        return NamedSharding(mesh, pspec)
+
+    @staticmethod
+    def _parse_mesh_layout(device_mesh_layout):
+        assert isinstance(device_mesh_layout, (list, tuple)), (
+            f"device_mesh_layout must be a list or tuple. "
+            f"Got {type(device_mesh_layout)}"
+        )
+        assert len(device_mesh_layout) == 2, (
+            f"The length of device_mesh_layout must be 2. "
+            f"Got {len(device_mesh_layout)}"
+        )
+        mesh_layout = []
+        for i in range(2):
+            if device_mesh_layout[i] is None:
+                assert (
+                    device_mesh_layout[1 - i] is not None
+                ), f"Invalid device_mesh_layout. Got {device_mesh_layout}."
+                mesh_layout.append(len(jax.devices()) // device_mesh_layout[1 - i])
+            else:
+                mesh_layout.append(device_mesh_layout[i])
+
+        return tuple(mesh_layout)
+
+    def get_params(self, device_mesh_layout=(1, None), weights=None):
+        """
+        Get the properly sharded parameters.
+        Args:
+            device_mesh_layout: the device mesh layout. For example:
+                (1, None) means data=1, model=len(jax.devices())
+                (2, None) means data=2, model=len(jax.devices()) // 2
+                (None, 2) means data=len(jax.devices()) // 2, model=2
+            weights: whether a tree of weights are already given (but may not be sharded)
+        Returns:
+            a tree of properly sharded parameters
+        """
+        key = jax.random.PRNGKey(0)
+
+        mesh_layout = self._parse_mesh_layout(device_mesh_layout)
+
+        dummy_input = jnp.array(
+            [[1 for _ in range(mesh_layout[1])] for _ in range(mesh_layout[0])]
+        )
+
+        abstract_variables = jax.eval_shape(self.init, key, dummy_input)
+        if self.sharded:
+            mesh = Mesh(
+                devices=mesh_utils.create_device_mesh(mesh_layout),
+                axis_names=("data", "model"),
+            )
+
+            rules = t5x_partitioning.standard_logical_axis_rules(
+                activation_partitioning_dims=1,
+                parameter_partitioning_dims=1,
+                additional_rules=(
+                    ("kv_length", None),
+                    ("intermediate", "model"),
+                ),
+            )
+            logical_state_spec = nn.get_partition_spec(abstract_variables)
+            logical_state_sharding = nn.logical_to_mesh_sharding(
+                logical_state_spec, mesh, rules
+            )
+
+            x_sharding = self.mesh_sharding(
+                PartitionSpec("data", None), mesh
+            )  # dimensions: (batch, length)
+
+            if weights is not None:
+                assert isinstance(
+                    weights, dict
+                ), f"weights must be a dict, got {type(weights)}"
+                assert (
+                    "params" in weights
+                ), f"The key params not found in 'weights'. Got {weights.keys()}"
+
+                if self.sharded:
+                    params = {
+                        "params": jax.tree_map(
+                            lambda x, y: jax.device_put(x, y),
+                            weights["params"],
+                            logical_state_sharding["params"],
+                        )
+                    }
+                else:
+                    params = weights
+            else:
+                params = jax.jit(
+                    self.init,
+                    in_shardings=(
+                        self.mesh_sharding(None, mesh),
+                        x_sharding,
+                    ),  # PRNG key and x
+                    out_shardings=logical_state_sharding,
+                )(key, dummy_input)
+        else:
+            params = self.init(key, dummy_input)
+
+        return params
+
+    def prepare_input(self, inputs, device_mesh_layout=(1, None), dtype=None):
+        if self.sharded:
+            mesh = Mesh(
+                devices=mesh_utils.create_device_mesh(
+                    self._parse_mesh_layout(device_mesh_layout)
+                ),
+                axis_names=("data", "model"),
+            )
+            inputs = jax.device_put(
+                inputs, self.mesh_sharding(PartitionSpec("data", None), mesh)
+            )
+        if dtype is not None:
+            inputs = jax.tree_map(lambda x: x.astype(dtype), inputs)
+        return inputs
 
     def setup(self):
         self.model = FlaxMixtralModule(self.config, dtype=self.dtype)
