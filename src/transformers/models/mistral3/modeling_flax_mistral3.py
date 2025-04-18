@@ -14,7 +14,7 @@
 # limitations under the License.
 """Flax Mistral3 model."""
 
-from typing import Optional, Tuple, Dict, List, Union, Any
+from typing import List, Optional, Tuple, Union
 
 import flax.linen as nn
 import jax
@@ -25,7 +25,6 @@ from flax.linen import combine_masks, make_causal_mask
 from flax.linen.attention import dot_product_attention_weights
 from flax.traverse_util import flatten_dict, unflatten_dict
 from jax import lax
-import optax
 
 from ...modeling_flax_outputs import (
     FlaxBaseModelOutput,
@@ -41,8 +40,8 @@ from .configuration_mistral3 import Mistral3Config
 logger = logging.get_logger(__name__)
 
 _CONFIG_FOR_DOC = "Mistral3Config"
-_REAL_CHECKPOINT_FOR_DOC = "mistralai/Mistral-3-Instruct-4k"
-_CHECKPOINT_FOR_DOC = "mistralai/Mistral-3-Instruct-4k"
+_REAL_CHECKPOINT_FOR_DOC = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+_CHECKPOINT_FOR_DOC = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 
 MISTRAL3_START_DOCSTRING = r"""
 
@@ -174,7 +173,7 @@ class FlaxMistral3PatchMerger(nn.Module):
         tokens_per_image = [h * w for h, w in image_sizes]
         d = image_features.shape[-1]
         
-        # Split and process each image in the batch
+        # Use vectorized implementation with jax.lax for better performance
         permuted_tensors = []
         start_idx = 0
         
@@ -185,28 +184,28 @@ class FlaxMistral3PatchMerger(nn.Module):
             
             # Reshape tokens into 2D grid
             h, w = image_sizes[i]
-            # In PyTorch: image_grid = image_tokens.view(h, w, d).permute(2, 0, 1).unsqueeze(0)
-            # In JAX/Flax:
+            # Reshape to [channels, height, width] and add batch dimension
             image_grid = image_tokens.reshape(h, w, d)
             image_grid = jnp.transpose(image_grid, (2, 0, 1))
-            image_grid = image_grid[None, ...]  # Add batch dimension
+            image_grid = image_grid[None, ...]  # Add batch dimension [1, C, H, W]
             
-            # Use sliding window approach to replace PyTorch's unfold
-            # Sliding window extracts spatial_merge_size x spatial_merge_size patches
-            merged_features = []
-            for y in range(0, h, self.spatial_merge_size):
-                for x in range(0, w, self.spatial_merge_size):
-                    if y + self.spatial_merge_size <= h and x + self.spatial_merge_size <= w:
-                        # Extract patch and flatten it
-                        patch = image_grid[:, :, y:y+self.spatial_merge_size, x:x+self.spatial_merge_size]
-                        patch = patch.reshape(-1)  # Flatten the patch
-                        merged_features.append(patch)
+            # Calculate output dimensions
+            out_h = (h - self.spatial_merge_size) // self.spatial_merge_size + 1
+            out_w = (w - self.spatial_merge_size) // self.spatial_merge_size + 1
             
-            if merged_features:
-                # Stack all merged features
-                grid = jnp.stack(merged_features)
-                permuted_tensors.append(grid)
-        
+            if out_h > 0 and out_w > 0:
+                # Use jax.lax.conv_general_dilated_patches for efficient patch extraction
+                patches = jax.lax.conv_general_dilated_patches(
+                    image_grid,
+                    filter_shape=(self.spatial_merge_size, self.spatial_merge_size),
+                    window_strides=(self.spatial_merge_size, self.spatial_merge_size),
+                    padding='VALID'
+                )
+                
+                # Reshape to flatten spatial dimensions (out_h*out_w, C*spatial_merge_size*spatial_merge_size)
+                patches = patches.reshape(patches.shape[0] * patches.shape[1], -1)
+                permuted_tensors.append(patches)
+            
         # Concatenate all processed features
         if permuted_tensors:
             image_features = jnp.concatenate(permuted_tensors, axis=0)
@@ -529,6 +528,15 @@ class FlaxMistral3ForConditionalGenerationModule(nn.Module):
         if pixel_values is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both pixel_values and inputs_embeds at the same time")
         
+        # Handle dynamic shapes for image processing
+        if pixel_values is not None:
+            # Assert shapes match expected dimensions
+            assert pixel_values.ndim == 4, f"Expected pixel_values to have 4 dimensions, got {pixel_values.ndim}"
+            if image_sizes is None:
+                # Default to full image size if not provided
+                b, c, h, w = pixel_values.shape
+                image_sizes = jnp.array([[h, w]] * b)
+                
         # Get embeddings from tokens if not provided directly
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(input_ids)
@@ -544,40 +552,33 @@ class FlaxMistral3ForConditionalGenerationModule(nn.Module):
                 deterministic=deterministic,
             )
             
-            # Replace special image tokens with image features
-            special_image_mask = (input_ids == self.config.image_token_index).astype(inputs_embeds.dtype)[..., None]
-            special_image_mask = jnp.broadcast_to(special_image_mask, inputs_embeds.shape)
+            # More efficient image feature integration
+            special_image_mask = jnp.equal(input_ids, self.config.image_token_index)
             
             # Check shape compatibility
-            n_image_tokens = jnp.sum((input_ids == self.config.image_token_index).astype(jnp.int32))
-            n_image_features = image_features.shape[0] * image_features.shape[1] if len(image_features.shape) > 1 else image_features.shape[0]
+            n_image_tokens = jnp.sum(special_image_mask.astype(jnp.int32))
+            n_image_features = image_features.shape[0]
             
             if n_image_tokens != n_image_features:
                 raise ValueError(
                     f"Image features and image tokens do not match: tokens: {n_image_tokens}, features: {n_image_features}"
                 )
             
-            # Insert image features at token positions
-            # In PyTorch: inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, image_features)
-            # In JAX, we need to use a combination of operations to achieve the same result
+            # Efficient update using functional indexing
+            batch_indices, seq_indices = jnp.nonzero(special_image_mask, size=n_image_features)
             
-            # First flatten our image features to be 1D
-            if len(image_features.shape) > 1:
-                flat_image_features = image_features.reshape(-1)
-            else:
-                flat_image_features = image_features
+            # Function to update embeddings with image features
+            def update_embeds(embeds, b_idx, s_idx, img_features):
+                for i in range(img_features.shape[0]):
+                    embeds = embeds.at[b_idx[i], s_idx[i]].set(img_features[i])
+                return embeds
             
-            # Then create an index array corresponding to positions where special_image_mask is True
-            mask_indices = jnp.where(special_image_mask.reshape(-1))[0]
-            
-            # Use dynamic_update_slice or scatter operations to place image features
-            # This is a simplified approach - in practice would need more careful handling of batched inputs
-            new_embeds = inputs_embeds.reshape(-1)
-            for i, idx in enumerate(mask_indices):
-                if i < len(flat_image_features):
-                    new_embeds = new_embeds.at[idx].set(flat_image_features[i])
-            
-            inputs_embeds = new_embeds.reshape(inputs_embeds.shape)
+            # Conditionally update embeddings only if there are image tokens
+            inputs_embeds = jax.lax.cond(
+                n_image_tokens > 0,
+                lambda: update_embeds(inputs_embeds, batch_indices, seq_indices, image_features),
+                lambda: inputs_embeds
+            )
         
         # Forward pass through language model
         lm_outputs = self.language_model(
@@ -596,16 +597,32 @@ class FlaxMistral3ForConditionalGenerationModule(nn.Module):
         
         logits = lm_outputs[0]
         
-        # Calculate loss if labels provided
+        # Calculate loss if labels provided with improved vectorized implementation
         loss = None
         if labels is not None:
             # Shift logits and labels for next token prediction
             shift_logits = logits[:, :-1]
             shift_labels = labels[:, 1:]
             
-            # Apply loss function
-            loss_fn = optax.softmax_cross_entropy
-            loss = jnp.mean(loss_fn(shift_logits, jax.nn.one_hot(shift_labels, shift_logits.shape[-1])))
+            if attention_mask is not None:
+                # Get the shifted mask for valid positions (exclude padding)
+                shift_mask = attention_mask[:, 1:].astype(jnp.float32)
+                
+                # Compute per-token loss
+                token_loss = optax.softmax_cross_entropy_with_integer_labels(
+                    shift_logits.reshape(-1, shift_logits.shape[-1]),
+                    shift_labels.reshape(-1)
+                ).reshape(shift_labels.shape)
+                
+                # Apply mask and compute mean over valid positions
+                masked_loss = token_loss * shift_mask
+                loss = jnp.sum(masked_loss) / jnp.maximum(jnp.sum(shift_mask), 1.0)
+            else:
+                # Simpler case without mask
+                loss = optax.softmax_cross_entropy_with_integer_labels(
+                    shift_logits.reshape(-1, shift_logits.shape[-1]),
+                    shift_labels.reshape(-1)
+                ).mean()
         
         # Return as dict or tuple based on return_dict flag
         if not return_dict:
@@ -639,6 +656,8 @@ class FlaxMistral3ForConditionalGeneration(FlaxMistral3PreTrainedModel):
         attention_mask=None,
         pixel_values=None,
         image_sizes=None,
+        past_key_values=None,
+        **kwargs
     ):
         """
         Prepare inputs for generation, handling both text and possible image inputs.
@@ -649,23 +668,32 @@ class FlaxMistral3ForConditionalGeneration(FlaxMistral3PreTrainedModel):
             attention_mask: Attention mask for input tokens
             pixel_values: Optional image pixel values
             image_sizes: Optional image sizes
+            past_key_values: Optional past key values for faster generation
             
         Returns:
             Dictionary of prepared inputs for generation
         """
-        # Initialize cache for faster generation
         batch_size = input_ids.shape[0]
-        past_key_values = self.init_cache(batch_size, max_length)
+        
+        # Initialize or get cache for faster generation
+        if past_key_values is None:
+            past_key_values = self.init_cache(batch_size, max_length)
+        
+        # Initialize or extend attention mask
+        if attention_mask is None:
+            attention_mask = jnp.ones((batch_size, input_ids.shape[1]), dtype=jnp.int32)
+        elif past_key_values is not None and input_ids.shape[1] > 1:
+            # Extend attention mask for generation if needed (not first step)
+            attention_mask = jnp.concatenate([
+                attention_mask,
+                jnp.ones((batch_size, 1), dtype=jnp.int32)
+            ], axis=1)
         
         # Create position IDs
         position_ids = jnp.broadcast_to(
             jnp.arange(jnp.atleast_2d(input_ids).shape[-1]), 
             input_ids.shape
         )
-        
-        # Create default attention mask if none provided
-        if attention_mask is None:
-            attention_mask = jnp.ones_like(input_ids)
         
         # Bundle inputs
         model_inputs = {
@@ -675,12 +703,12 @@ class FlaxMistral3ForConditionalGeneration(FlaxMistral3PreTrainedModel):
             "past_key_values": past_key_values,
         }
         
-        # Add image inputs if available
-        if pixel_values is not None:
+        # Only pass pixel_values on first step of generation
+        is_first_step = input_ids.shape[1] == 1
+        if is_first_step and pixel_values is not None:
             model_inputs["pixel_values"] = pixel_values
-        
-        if image_sizes is not None:
-            model_inputs["image_sizes"] = image_sizes
+            if image_sizes is not None:
+                model_inputs["image_sizes"] = image_sizes
         
         return model_inputs
     
