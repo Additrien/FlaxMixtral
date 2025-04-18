@@ -47,6 +47,9 @@ class Mistral3PatchMerger(nn.Module):
         self.merging_layer = nn.Linear(hidden_size * self.spatial_merge_size**2, hidden_size, bias=False)
 
     def forward(self, image_features: torch.Tensor, image_sizes: torch.Tensor) -> torch.Tensor:
+        # Print input shapes for debugging
+        print(f"Mistral3PatchMerger input shapes: image_features={image_features.shape}, image_sizes={image_sizes.shape}")
+        
         image_sizes = [
             (image_size[0] // self.patch_size, image_size[1] // self.patch_size) for image_size in image_sizes
         ]
@@ -67,6 +70,10 @@ class Mistral3PatchMerger(nn.Module):
 
         image_features = torch.cat(permuted_tensor, dim=0)
         image_features = self.merging_layer(image_features)
+        
+        # Print output shape for debugging
+        print(f"Mistral3PatchMerger output shape: {image_features.shape}")
+        
         return image_features
 
 
@@ -88,11 +95,18 @@ class Mistral3MultiModalProjector(nn.Module):
         )
 
     def forward(self, image_features: torch.Tensor, image_sizes: torch.Tensor):
+        # Print input shapes for debugging
+        print(f"Mistral3MultiModalProjector input shapes: image_features={image_features.shape}, image_sizes={image_sizes.shape}")
+        
         image_features = self.norm(image_features)
         image_features = self.patch_merger(image_features, image_sizes)
         hidden_states = self.linear_1(image_features)
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)
+        
+        # Print output shape for debugging
+        print(f"Mistral3MultiModalProjector output shape: {hidden_states.shape}")
+        
         return hidden_states
 
 
@@ -135,6 +149,9 @@ class Mistral3ForConditionalGeneration(LlavaForConditionalGeneration):
         Returns:
             image_features (`torch.Tensor`): Image feature tensor of shape `(num_images, image_length, embed_dim)`).
         """
+        # Print input for debugging
+        print(f"Mistral3ForConditionalGeneration.get_image_features inputs: pixel_values={pixel_values.shape}, image_sizes={image_sizes.shape}")
+        
         kwargs = {k: v for k, v in kwargs.items() if v is not None}
         # this is not memory efficient at all (output_hidden_states=True) will save all the hidden states.
         image_outputs = self.vision_tower(pixel_values, image_sizes=image_sizes, output_hidden_states=True, **kwargs)
@@ -147,6 +164,10 @@ class Mistral3ForConditionalGeneration(LlavaForConditionalGeneration):
             selected_image_feature = torch.cat(hs_pool, dim=-1)
 
         image_features = self.multi_modal_projector(selected_image_feature.squeeze(0), image_sizes)
+        
+        # Print output for debugging
+        print(f"Mistral3ForConditionalGeneration.get_image_features output: {image_features.shape}")
+        
         return image_features
 
     def forward(
@@ -206,6 +227,10 @@ class Mistral3ForConditionalGeneration(LlavaForConditionalGeneration):
         "What is the image?The image depicts two cats lying on a pink blanket."
         ```"""
 
+        # Print input shapes for debugging
+        print(f"Mistral3ForConditionalGeneration inputs: input_ids={None if input_ids is None else input_ids.shape}, "
+              f"pixel_values={None if pixel_values is None else pixel_values.shape}")
+        
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -282,6 +307,9 @@ class Mistral3ForConditionalGeneration(LlavaForConditionalGeneration):
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
 
+        # Print output shapes for debugging
+        print(f"Mistral3ForConditionalGeneration output: logits={logits.shape}")
+        
         return Mistral3CausalLMOutputWithPast(
             loss=loss,
             logits=logits,

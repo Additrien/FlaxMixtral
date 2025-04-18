@@ -14,15 +14,29 @@
 from typing import TYPE_CHECKING
 
 from ...utils import _LazyModule
-from ...utils.import_utils import define_import_structure
+from ...utils.import_utils import (
+    is_flax_available,
+    define_import_structure
+)
 
 
 if TYPE_CHECKING:
     from .configuration_mistral3 import *
     from .modeling_mistral3 import *
     from .processing_mistral3 import *
+    
+    if is_flax_available():
+        from .modeling_flax_mistral3 import *
 else:
     import sys
 
     _file = globals()["__file__"]
-    sys.modules[__name__] = _LazyModule(__name__, _file, define_import_structure(_file), module_spec=__spec__)
+    _import_structure = define_import_structure(_file)
+
+    if is_flax_available():
+        _import_structure["modeling_flax_mistral3"] = [
+            "FlaxMistral3ForCausalLM",
+            "FlaxMistral3Model",
+        ]
+
+    sys.modules[__name__] = _LazyModule(__name__, _file, _import_structure, module_spec=__spec__)

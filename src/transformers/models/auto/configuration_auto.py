@@ -200,6 +200,7 @@ CONFIG_MAPPING_NAMES = OrderedDict(
         ("mimi", "MimiConfig"),
         ("mistral", "MistralConfig"),
         ("mistral3", "Mistral3Config"),
+        ("mistral-instruct", "MistralConfig"),
         ("mixtral", "MixtralConfig"),
         ("mlcd", "MLCDVisionConfig"),
         ("mllama", "MllamaConfig"),
