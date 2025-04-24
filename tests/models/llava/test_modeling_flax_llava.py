@@ -23,18 +23,15 @@ import jax.numpy as jnp
 import numpy as np
 from flax.core.frozen_dict import FrozenDict, unfreeze
 from flax.traverse_util import flatten_dict
-import torch
 import requests
 from PIL import Image
 
 from transformers import (
     LlavaConfig,
-    LlavaForConditionalGeneration,
     AutoProcessor,
     is_flax_available,
     is_vision_available,
 )
-from transformers.modeling_flax_pytorch_utils import convert_pytorch_state_dict_to_flax
 from transformers.testing_utils import require_flax, slow, torch_device, require_torch_gpu
 
 from ...test_configuration_common import ConfigTester
@@ -45,9 +42,6 @@ if is_flax_available():
     from transformers import FlaxLlavaForConditionalGeneration
 else:
     FlaxLlavaForConditionalGeneration = None
-
-if is_vision_available():
-    from PIL import Image
 
 
 class FlaxLlavaVisionText2TextModelTester:
@@ -166,7 +160,7 @@ class FlaxLlavaVisionText2TextModelTester:
 @require_flax
 class FlaxLlavaForConditionalGenerationModelTest(FlaxModelTesterMixin, unittest.TestCase):
     """
-    Test class for FlaxLlavaForConditionalGeneration
+    Test class for FlaxLlavaForConditionalGeneration.
     """
     all_model_classes = (FlaxLlavaForConditionalGeneration,) if is_flax_available() else ()
     
@@ -175,10 +169,7 @@ class FlaxLlavaForConditionalGenerationModelTest(FlaxModelTesterMixin, unittest.
         self.config_tester = ConfigTester(self, config_class=LlavaConfig, has_text_modality=False)
         
     def test_config(self):
-        # Instead of using the common config tester, we'll implement a custom check
-        # specific to LlavaConfig that doesn't require hidden_size attribute
-        
-        # Create a basic config instance
+        # Test specific to LlavaConfig
         config = LlavaConfig()
         
         # Basic validation of config attributes
@@ -199,211 +190,39 @@ class FlaxLlavaForConditionalGenerationModelTest(FlaxModelTesterMixin, unittest.
         
         # Test save and load functions
         with tempfile.TemporaryDirectory() as tmp_dir:
-            config_path = os.path.join(tmp_dir, "config.json")
             config.save_pretrained(tmp_dir)
             loaded_config = LlavaConfig.from_pretrained(tmp_dir)
             self.assertDictEqual(config.to_dict(), loaded_config.to_dict())
         
-    # Overriding because the model requires special inputs
+    # Override some tests from FlaxModelTesterMixin that don't apply to this model
     def test_forward_signature(self):
         pass
     
-    # Overriding because the model requires special inputs
     def test_jit_compilation(self):
         pass
+
+
+@require_flax
+@require_torch_gpu
+class FlaxLlavaForConditionalGenerationIntegrationTest(unittest.TestCase):
+    """
+    Integration tests for FlaxLlavaForConditionalGeneration.
+    """
     
-    def test_model_common_attributes(self):
-        config, _ = self.model_tester.prepare_config_and_inputs_for_common()
-        model = self.all_model_classes[0](config)
-        self.assertIsInstance(model.config, LlavaConfig)
-
-    def test_attention_outputs(self):
-        config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
-        
-        # Check attention outputs for default model
-        for model_class in self.all_model_classes:
-            model = model_class(config)
-            
-            # Make sure output_attentions=True works
-            inputs_dict["output_attentions"] = True
-            outputs = model(**inputs_dict)
-            
-            # Check format of attention outputs
-            if config.return_dict:
-                self.assertIsNotNone(outputs.attentions)
-                self.assertIsInstance(outputs.attentions, tuple)
-                self.assertEqual(len(outputs.attentions), config.text_config.num_hidden_layers)
-                
-                batch_size = inputs_dict["input_ids"].shape[0]
-                seq_length = inputs_dict["input_ids"].shape[1]
-                
-                # The first attention layer output might have a different shape when images are processed
-                # So we'll skip checking the exact dimensions, and just verify:
-                # 1. It's a 4D tensor (batch, heads, seq, seq)
-                # 2. batch dimension is correct 
-                # 3. It has the right number of attention heads
-                
-                for i, attention_layer in enumerate(outputs.attentions):
-                    self.assertIsInstance(attention_layer, jnp.ndarray)
-                    self.assertEqual(len(attention_layer.shape), 4)
-                    self.assertEqual(attention_layer.shape[0], batch_size)
-                    self.assertEqual(attention_layer.shape[1], config.text_config.num_attention_heads)
-                    
-                    # Check that attention values are normalized (sum to 1)
-                    attention_sum = jnp.sum(attention_layer, axis=-1)
-                    # Check the first element of each sequence in the batch
-                    self.assertTrue(
-                        jnp.allclose(attention_sum[:, :, 0], 1.0, atol=1e-5),
-                        f"Layer {i} attention probabilities do not sum to 1"
-                    )
-            else:
-                # For tuple outputs, attentions should be at index 3 if there's loss, or index 2 otherwise
-                has_loss = len(outputs) > 3
-                attentions_index = 3 if has_loss else 2
-                
-                self.assertIsInstance(outputs[attentions_index], tuple)
-                self.assertEqual(len(outputs[attentions_index]), config.text_config.num_hidden_layers)
-
-    def test_model_common_attributes(self):
-        config, _ = self.model_tester.prepare_config_and_inputs_for_common()
-        model = self.all_model_classes[0](config)
-        self.assertIsInstance(model.config, LlavaConfig)
-
-    def test_default_params_dtype(self):
-        config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
-        
-        for model_class in self.all_model_classes:
-            # Create model
-            model = model_class(config)
-            
-            # Initialize with dummy parameters
-            params = model._create_dummy_params()
-            
-            # Check if all params have the expected dtype (float32 by default)
-            flat_params = flatten_dict(unfreeze(params))
-            
-            for param_name, param in flat_params.items():
-                # Skip non-float parameters (e.g., integers for positions)
-                if param.dtype.kind == 'f':
-                    self.assertEqual(
-                        param.dtype,
-                        jnp.float32,
-                        f"Parameter {param_name} has dtype {param.dtype}, expected float32"
-                    )
-            
-            # Create with float16 dtype
-            model_fp16 = model_class(config, dtype=jnp.float16)
-            params_fp16 = model_fp16._create_dummy_params()
-            
-            # Check that parameters use float16
-            flat_params_fp16 = flatten_dict(unfreeze(params_fp16))
-            
-            for param_name, param in flat_params_fp16.items():
-                if param.dtype.kind == 'f':
-                    self.assertEqual(
-                        param.dtype,
-                        jnp.float16,
-                        f"Parameter {param_name} has dtype {param.dtype}, expected float16"
-                    )
-
-    def test_equivalence_pt_to_flax(self):
-        config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
-        model_id = "llava-hf/llava-1.5-7b-hf"
-
-        # Load PyTorch model
-        pt_model = LlavaForConditionalGeneration.from_pretrained(model_id).to(torch_device)
-        pt_model.eval()
-
-        # --- Manual Conversion ---
-        # 1. Instantiate Flax model without initializing/loading weights
-        #    Use the config from the PT model to ensure consistency
-        fx_model = FlaxLlavaForConditionalGeneration(pt_model.config, dtype=jnp.float32, _do_init=False)
-
-        # 2. Get PyTorch state dict
-        pt_state_dict = pt_model.state_dict()
-
-        # 3. Convert state dict
-        try:
-            fx_state = convert_pytorch_state_dict_to_flax(pt_state_dict, fx_model)
-        except Exception as e:
-            print("Error during state dict conversion. PyTorch keys vs Flax expected structure might differ.")
-            print("Sample PyTorch keys:", list(pt_state_dict.keys())[:15])
-            # To get expected Flax structure, we might need to initialize briefly
-            try:
-                dummy_fx_model = FlaxLlavaForConditionalGeneration(pt_model.config, dtype=jnp.float32)
-                print("Sample expected Flax keys (flattened):", list(flatten_dict(dummy_fx_model.params_shape_tree).keys())[:15])
-            except Exception:
-                print("Could not determine expected Flax keys.")
-            raise e
-
-        # 4. Assign converted parameters to the Flax model instance
-        fx_model.params = fx_state
-        # --- End Manual Conversion ---
-
-        # Prepare inputs
-        fx_inputs = inputs_dict
-        pt_inputs = {k: torch.tensor(np.array(v)).to(torch_device) for k, v in fx_inputs.items()}
-
-        # Run inference
-        with torch.no_grad():
-            pt_pixel_values = pt_inputs["pixel_values"].to(pt_model.dtype)
-            pt_input_ids = pt_inputs["input_ids"]
-            pt_attention_mask = pt_inputs["attention_mask"]
-
-            pt_outputs = pt_model(
-                pixel_values=pt_pixel_values, input_ids=pt_input_ids, attention_mask=pt_attention_mask,
-                # Use loaded config attributes which might differ slightly from test config
-                output_hidden_states=pt_model.config.output_hidden_states, 
-                output_attentions=pt_model.config.output_attentions, 
-                return_dict=True
-            )
-
-        fx_pixel_values = fx_inputs["pixel_values"].astype(fx_model.dtype)
-        fx_input_ids = fx_inputs["input_ids"]
-        fx_attention_mask = fx_inputs["attention_mask"]
-
-        # Pass params explicitly since we assigned them manually
-        fx_outputs = fx_model(
-            pixel_values=fx_pixel_values, input_ids=fx_input_ids, attention_mask=fx_attention_mask,
-            # Use loaded config attributes
-            output_hidden_states=pt_model.config.output_hidden_states, 
-            output_attentions=pt_model.config.output_attentions, 
-            return_dict=True,
-            params=fx_model.params # Pass params explicitly
-        )
-
-        # Compare outputs
-        self.assert_almost_equals(fx_outputs.logits, pt_outputs.logits.cpu().numpy(), decimal=3)
-
-        # Use loaded config for conditional checks
-        if pt_model.config.output_hidden_states:
-            self.assertEqual(len(fx_outputs.hidden_states), len(pt_outputs.hidden_states), "Number of hidden states differ")
-            for fx_hidden, pt_hidden in zip(fx_outputs.hidden_states, pt_outputs.hidden_states):
-                self.assert_almost_equals(fx_hidden, pt_hidden.cpu().numpy(), decimal=3)
-
-        if pt_model.config.output_attentions:
-             self.assertEqual(len(fx_outputs.attentions), len(pt_outputs.attentions), "Number of attentions differ")
-             for fx_attn, pt_attn in zip(fx_outputs.attentions, pt_outputs.attentions):
-                 self.assert_almost_equals(fx_attn, pt_attn.cpu().numpy(), decimal=3)
-
-    # Renamed test method and refactored for integration testing
-    @slow 
-    @require_torch_gpu # Keep this decorator as Image/requests might be considered PT dependencies in testing infra
+    @slow
     def test_integration_generate_output(self):
+        """
+        Test generate output matches PyTorch model.
+        Based on test_small_model_integration_test_llama in PyTorch.
+        """
         model_id = "llava-hf/llava-1.5-7b-hf"
-        # Load the processor
         processor = AutoProcessor.from_pretrained(model_id)
 
-        # Load the Flax model 
-        # Using float16 for potentially faster inference, adjust if precision issues arise
+        # Load the Flax model
         dtype = jnp.float16 
         try:
-            # Attempt standard loading
             fx_model = FlaxLlavaForConditionalGeneration.from_pretrained(model_id, dtype=dtype)
         except OSError as e:
-            print(f"Direct loading failed: {e}. Ensure model is cached or network available.")
-            # If needed, add fallback to manual weight loading here, 
-            # but it would require weights pre-converted offline.
             self.skipTest(f"Skipping test because Flax model loading failed: {e}")
             return 
 
@@ -421,15 +240,10 @@ class FlaxLlavaForConditionalGenerationModelTest(FlaxModelTesterMixin, unittest.
         inputs = processor(text=prompt, images=raw_image, return_tensors="np")
 
         # Generate output
-        # Ensure input tensors have the same dtype as the model
-        pixel_values = inputs["pixel_values"].astype(dtype) 
-        input_ids = inputs["input_ids"]
-        attention_mask = inputs["attention_mask"]
-        
         output_ids = fx_model.generate(
-            pixel_values=pixel_values,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
+            pixel_values=inputs["pixel_values"].astype(dtype),
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs["attention_mask"],
             max_new_tokens=900,
             do_sample=False
         )
@@ -441,238 +255,53 @@ class FlaxLlavaForConditionalGenerationModelTest(FlaxModelTesterMixin, unittest.
 
         self.assertEqual(generated_text, EXPECTED_DECODED_TEXT)
 
-    # Remove the old equivalence test or keep it skipped if desired
-    # def test_equivalence_pt_to_flax(self):
-    #     self.skipTest("Replaced by test_integration_generate_output")
-    
-    # Keep the Flax -> PT equivalence check skipped
-    def test_equivalence_flax_to_pt(self):
-        self.skipTest(reason="Flax -> PT equivalence check not implemented yet.")
+    @slow
+    def test_integration_generate_output_batched(self):
+        """
+        Test generate output for a batch of inputs.
+        Based on test_small_model_integration_test_llama_batched in PyTorch.
+        """
+        model_id = "llava-hf/llava-1.5-7b-hf"
+        processor = AutoProcessor.from_pretrained(model_id)
 
-    def test_from_pretrained_save_pretrained(self):
-        config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
+        # Load the Flax model
+        dtype = jnp.float16
+        try:
+            fx_model = FlaxLlavaForConditionalGeneration.from_pretrained(model_id, dtype=dtype)
+        except OSError as e:
+            self.skipTest(f"Skipping test because Flax model loading failed: {e}")
+            return
+
+        prompts = [
+            "USER: <image>\nWhat are the things I should be cautious about when I visit this place? What should I bring with me?\nASSISTANT:",
+            "USER: <image>\nWhat is this?\nASSISTANT:",
+        ]
         
-        for model_class in self.all_model_classes:
-            model = model_class(config)
-            
-            # Initialize with dummy parameters
-            dummy_params = model._create_dummy_params()
-            
-            with tempfile.TemporaryDirectory() as temp_dir:
-                # Save the dummy parameters
-                model.save_pretrained(temp_dir, params=dummy_params)
-                
-                # Load from the saved location
-                model_loaded = model_class.from_pretrained(temp_dir)
-                
-                # Compare parameters
-                params_loaded = model_loaded.params
-                flat_params = flatten_dict(unfreeze(dummy_params))
-                flat_params_loaded = flatten_dict(unfreeze(params_loaded))
-                
-                # Basic structure comparison - check keys
-                self.assertEqual(set(flat_params.keys()), set(flat_params_loaded.keys()),
-                                 "Keys in loaded parameters don't match original keys")
-                
-                # Check that values match for at least a subset of parameters
-                # (only check a few to avoid excessive test times)
-                for key in list(flat_params.keys())[:5]:
-                    self.assertTrue(
-                        jnp.allclose(flat_params[key], flat_params_loaded[key]),
-                        f"Parameter {key} doesn't match after loading"
-                    )
+        try:
+            image1 = Image.open(requests.get("https://llava-vl.github.io/static/images/view.jpg", stream=True).raw)
+            image2 = Image.open(requests.get("http://images.cocodataset.org/val2017/000000039769.jpg", stream=True).raw)
+        except Exception as e:
+            self.skipTest(f"Skipping test because images could not be downloaded: {e}")
+            return
 
-    def test_from_pretrained_with_no_automatic_init(self):
-        config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
-        
-        for model_class in self.all_model_classes:
-            model = model_class(config)
-            
-            # Initialize with dummy parameters
-            dummy_params = model._create_dummy_params()
-            
-            # 1. Create model without initialization
-            model_no_init = model_class(config, _do_init=False)
-            
-            # 2. Verify that accessing params raises error
-            with self.assertRaises(ValueError):
-                _ = model_no_init.params
-            
-            # 3. Verify that the model object has the expected behavior
-            self.assertIsNotNone(model_no_init.module)
-            
-            # 4. Create params manually
-            params = model_no_init.init_weights(model_no_init.key, model_no_init.input_shape)
-            
-            # 5. Check params have the expected structure
-            flat_params = flatten_dict(unfreeze(params))
-            flat_dummy_params = flatten_dict(unfreeze(dummy_params))
-            self.assertEqual(set(flat_params.keys()), set(flat_dummy_params.keys()),
-                            "Parameter keys don't match after initialization")
-            
-            # 6. The model should work with manually provided params
-            outputs = model_no_init(
-                **{k: v for k, v in inputs_dict.items() if k in ["input_ids", "pixel_values", "attention_mask"]},
-                params=params,
-                return_dict=True
-            )
-            
-            # 7. Verify outputs have the expected structure
-            self.assertIsNotNone(outputs.logits)
-            self.assertEqual(outputs.logits.shape[0], inputs_dict["input_ids"].shape[0])
-            self.assertEqual(outputs.logits.shape[-1], config.text_config.vocab_size)
+        # Prepare batch inputs
+        inputs = processor(prompts, images=[image1, image2], return_tensors="np", padding=True)
 
-    def test_hidden_states_output(self):
-        config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
-        
-        # Check hidden states outputs for default model
-        for model_class in self.all_model_classes:
-            model = model_class(config)
-            
-            # Make sure output_hidden_states=True works
-            inputs_dict["output_hidden_states"] = True
-            outputs = model(**inputs_dict)
-            
-            # Check format of hidden states outputs
-            if config.return_dict:
-                self.assertIsNotNone(outputs.hidden_states)
-                self.assertIsInstance(outputs.hidden_states, tuple)
-                
-                # Should match the number of layers in the model plus the embeddings
-                expected_num_layers = config.text_config.num_hidden_layers + 1  # +1 for embeddings
-                self.assertEqual(len(outputs.hidden_states), expected_num_layers)
-                
-                batch_size = inputs_dict["input_ids"].shape[0]
-                
-                # Check each hidden state has correct shape structure
-                for hidden_states in outputs.hidden_states:
-                    self.assertIsInstance(hidden_states, jnp.ndarray)
-                    self.assertEqual(len(hidden_states.shape), 3)  # [batch, seq, hidden_dim]
-                    self.assertEqual(hidden_states.shape[0], batch_size)
-                    self.assertEqual(hidden_states.shape[2], config.text_config.hidden_size)
-                
-                # Also check image_hidden_states if present
-                if hasattr(outputs, "image_hidden_states") and outputs.image_hidden_states is not None:
-                    self.assertIsInstance(outputs.image_hidden_states, tuple)
-                    
-                    # Should match the number of layers in the vision model plus the embeddings
-                    expected_vision_layers = config.vision_config.num_hidden_layers + 1  # +1 for embeddings
-                    self.assertEqual(len(outputs.image_hidden_states), expected_vision_layers)
-                    
-                    # Check basic structure of vision hidden states
-                    for hidden_states in outputs.image_hidden_states:
-                        self.assertIsInstance(hidden_states, jnp.ndarray)
-                        self.assertEqual(len(hidden_states.shape), 3)  # [batch, seq, hidden_dim]
-                        self.assertEqual(hidden_states.shape[0], batch_size)
-            else:
-                # For tuple outputs, hidden_states should be at index 2 if there's loss, or index 1 otherwise
-                has_loss = len(outputs) > 3
-                hidden_states_index = 2 if has_loss else 1
-                
-                self.assertIsInstance(outputs[hidden_states_index], tuple)
-                self.assertEqual(len(outputs[hidden_states_index]), config.text_config.num_hidden_layers + 1)
+        # Generate output
+        output_ids = fx_model.generate(
+            pixel_values=inputs["pixel_values"].astype(dtype),
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs["attention_mask"],
+            max_new_tokens=20,
+            do_sample=False
+        )
 
-    def test_model_outputs_equivalence(self):
-        config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
-        
-        for model_class in self.all_model_classes:
-            model = model_class(config)
-            
-            # Test with default return_dict=True
-            outputs_dict = model(**inputs_dict, return_dict=True)
-            
-            # Test with return_dict=False
-            outputs_tuple = model(**inputs_dict, return_dict=False)
-            
-            # Check that tuple and dict outputs match in structure
-            if len(outputs_tuple) > 1:
-                # If we have more than 1 output, compare logits
-                self.assertTrue(
-                    jnp.allclose(outputs_dict.logits, outputs_tuple[0], rtol=1e-4, atol=1e-4),
-                    "Dict and tuple outputs don't match for logits"
-                )
-                
-                # If hidden states are present in the dict
-                if hasattr(outputs_dict, "hidden_states") and outputs_dict.hidden_states is not None:
-                    hidden_states_dict = outputs_dict.hidden_states
-                    hidden_states_tuple = None
-                    
-                    # In tuple format, hidden states are typically at index 2 if there's loss, else index 1
-                    has_loss = len(outputs_tuple) > 3
-                    hidden_states_tuple_idx = 2 if has_loss else 1
-                    if len(outputs_tuple) > hidden_states_tuple_idx:
-                        hidden_states_tuple = outputs_tuple[hidden_states_tuple_idx]
-                    
-                    if hidden_states_tuple is not None:
-                        self.assertEqual(len(hidden_states_dict), len(hidden_states_tuple),
-                                        "Number of hidden states doesn't match between dict and tuple outputs")
-                        
-                        # Check a sample of hidden states
-                        for i in range(min(len(hidden_states_dict), 1)):  # Only check first one for speed
-                            self.assertTrue(
-                                jnp.allclose(hidden_states_dict[i], hidden_states_tuple[i], rtol=1e-4, atol=1e-4),
-                                f"Hidden state {i} doesn't match between dict and tuple outputs"
-                            )
-                
-                # If attentions are present in the dict
-                if hasattr(outputs_dict, "attentions") and outputs_dict.attentions is not None:
-                    attentions_dict = outputs_dict.attentions
-                    attentions_tuple = None
-                    
-                    # In tuple format, attentions are typically at index 3 if there's loss, else index 2
-                    has_loss = len(outputs_tuple) > 3
-                    attentions_tuple_idx = 3 if has_loss else 2
-                    if len(outputs_tuple) > attentions_tuple_idx:
-                        attentions_tuple = outputs_tuple[attentions_tuple_idx]
-                    
-                    if attentions_tuple is not None:
-                        self.assertEqual(len(attentions_dict), len(attentions_tuple),
-                                        "Number of attention layers doesn't match between dict and tuple outputs")
-                        
-                        # Check a sample of attention outputs
-                        for i in range(min(len(attentions_dict), 1)):  # Only check first one for speed
-                            self.assertTrue(
-                                jnp.allclose(attentions_dict[i], attentions_tuple[i], rtol=1e-4, atol=1e-4),
-                                f"Attention layer {i} doesn't match between dict and tuple outputs"
-                            )
+        # Decode and compare
+        generated_texts = processor.batch_decode(output_ids.sequences, skip_special_tokens=True)
 
-    def test_no_automatic_init(self):
-        config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
-        config.return_dict = True
-    
-        for model_class in self.all_model_classes:
-            model = model_class(config, _do_init=False)
-    
-            # Check that accessing params raises ValueError when _do_init is False
-            with self.assertRaises(ValueError):
-                params = model.params
-    
-            # Check if params can be properly initialized when calling init_weights
-            params = model.init_weights(model.key, model.input_shape)
-            assert isinstance(params, (dict, FrozenDict)), f"params are not an instance of dict or FrozenDict"
-            
-            # Skip checking individual parameters for now since we're using empty params for testing
-            # Just ensure we have *some* parameters even if minimal for testing
-            assert len(flatten_dict(unfreeze(params))) > 0, "Parameters should not be completely empty"
-    
-            # Check that setting params raises ValueError when _do_init is False
-            with self.assertRaises(ValueError):
-                model.params = params
-    
-            # Check if we can do a forward pass with explicit params
-            inputs_dict["output_hidden_states"] = True
-            inputs = self._prepare_for_class(inputs_dict, model_class).copy()
-            
-            # We should be able to pass params explicitly
-            outputs = model(**inputs, params=params)
-            
-            # Verify we got valid outputs (either a tuple or a FlaxLlavaCausalLMOutputWithPast)
-            assert outputs is not None, "Model should return something"
-            
-            if hasattr(outputs, "logits"):
-                # DataClass output
-                assert hasattr(outputs, "logits"), "Output should have logits"
-                assert outputs.logits is not None, "Logits should not be None"
-            else:
-                # Tuple output
-                assert len(outputs) > 0, "Output tuple should not be empty" 
+        EXPECTED_DECODED_TEXTS = [
+            'USER:  \nWhat are the things I should be cautious about when I visit this place? What should I bring with me?\nASSISTANT: When visiting this place, which appears to be a dock or pier extending over a body of water', 
+            'USER:  \nWhat is this?\nASSISTANT: The image features two cats lying down on a pink couch. One cat is located on'
+        ]
+
+        self.assertEqual(generated_texts, EXPECTED_DECODED_TEXTS) 
