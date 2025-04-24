@@ -1,0 +1,37 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# LLaVA FLAX Conversion Guide
+
+This project involves converting the LLaVA (Large Language and Vision Assistant) model from PyTorch to FLAX for integration with Hugging Face Transformers.
+
+## Key Conversion Steps
+
+1. Analyze PyTorch implementation
+2. Identify reusable FLAX components from existing models (especially from LLAMA)
+3. Create FLAX equivalents for each PyTorch class, ensuring structure matches safetensor keys
+4. Update auto-mapping files for proper integration
+5. Add tests and documentation
+
+## Important Files to Create/Modify
+
+### Model Implementation
+- `src/transformers/models/llava/modeling_flax_llava.py` (main implementation)
+- `src/transformers/models/llava/__init__.py` (expose FLAX classes)
+
+### Integration Files
+- `src/transformers/models/auto/modeling_flax_auto.py` (auto-mapping)
+- `src/transformers/__init__.py` (public exports)
+- `src/transformers/models/__init__.py` (add to model list)
+
+### Testing
+- `tests/models/llava/test_modeling_flax_llava.py`
+### Documentation
+- `docs/source/en/model_doc/llava.md`
+
+## Special Considerations
+- Follow the "Copied from" convention for reused code
+- Leverage existing LLaVA safetensors for weights (no separate conversion needed)
+- Properly handle multimodal aspects (vision+text)
