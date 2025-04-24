@@ -31,11 +31,4 @@ else:
     import sys
 
     _file = globals()["__file__"]
-    _import_structure = define_import_structure(_file)
-
-    if is_flax_available():
-        _import_structure["modeling_flax_mistral3"] = [
-            "FlaxMistral3ForConditionalGeneration",
-        ]
-
-    sys.modules[__name__] = _LazyModule(__name__, _file, _import_structure, module_spec=__spec__)
+    sys.modules[__name__] = _LazyModule(__name__, _file, define_import_structure(_file), module_spec=__spec__)

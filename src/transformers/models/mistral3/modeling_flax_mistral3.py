@@ -738,3 +738,8 @@ class FlaxMistral3ForConditionalGeneration(FlaxMistral3PreTrainedModel):
         
         return model_kwargs
 
+
+__all__ = [
+    "FlaxMistral3ForConditionalGeneration",
+]
+
