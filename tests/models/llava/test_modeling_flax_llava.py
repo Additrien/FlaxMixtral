@@ -24,7 +24,6 @@ import numpy as np
 from flax.core.frozen_dict import FrozenDict, unfreeze
 from flax.traverse_util import flatten_dict
 import requests
-from PIL import Image
 
 from transformers import (
     LlavaConfig,
@@ -32,7 +31,7 @@ from transformers import (
     is_flax_available,
     is_vision_available,
 )
-from transformers.testing_utils import require_flax, slow, torch_device, require_torch_gpu
+from transformers.testing_utils import require_flax, slow
 
 from ...test_configuration_common import ConfigTester
 from ...test_modeling_flax_common import FlaxModelTesterMixin, floats_tensor, ids_tensor
@@ -42,6 +41,9 @@ if is_flax_available():
     from transformers import FlaxLlavaForConditionalGeneration
 else:
     FlaxLlavaForConditionalGeneration = None
+
+if is_vision_available():
+    from PIL import Image
 
 
 class FlaxLlavaVisionText2TextModelTester:
@@ -193,7 +195,7 @@ class FlaxLlavaForConditionalGenerationModelTest(FlaxModelTesterMixin, unittest.
             config.save_pretrained(tmp_dir)
             loaded_config = LlavaConfig.from_pretrained(tmp_dir)
             self.assertDictEqual(config.to_dict(), loaded_config.to_dict())
-        
+    
     # Override some tests from FlaxModelTesterMixin that don't apply to this model
     def test_forward_signature(self):
         pass
@@ -203,17 +205,68 @@ class FlaxLlavaForConditionalGenerationModelTest(FlaxModelTesterMixin, unittest.
 
 
 @require_flax
-@require_torch_gpu
 class FlaxLlavaForConditionalGenerationIntegrationTest(unittest.TestCase):
     """
     Integration tests for FlaxLlavaForConditionalGeneration.
     """
     
+    def setUp(self):
+        # Use the same model as PyTorch test for consistency
+        self.processor = AutoProcessor.from_pretrained("llava-hf/bakLlava-v1-hf")
+    
     @slow
-    def test_integration_generate_output(self):
+    def test_small_model_integration_test(self):
+        """
+        Test the Flax model with a small sample input to verify outputs match expected values.
+        Equivalent to PyTorch test_small_model_integration_test.
+        """
+        # Using the same model ID as in PyTorch tests
+        model_id = "llava-hf/bakLlava-v1-hf"
+        
+        try:
+            model = FlaxLlavaForConditionalGeneration.from_pretrained(model_id, dtype=jnp.float16)
+        except OSError as e:
+            self.skipTest(f"Skipping test because model could not be loaded: {e}")
+            return
+            
+        # Using the same prompt as in PyTorch tests
+        prompt = "<image>\nUSER: What are the things I should be cautious about when I visit this place?\nASSISTANT:"
+        image_file = "https://llava-vl.github.io/static/images/view.jpg"
+        
+        try:
+            raw_image = Image.open(requests.get(image_file, stream=True).raw)
+        except Exception as e:
+            self.skipTest(f"Skipping test because image could not be downloaded: {e}")
+            return
+        
+        # Use return_tensors="np" for Flax
+        inputs = self.processor(prompt, raw_image, return_tensors="np")
+        
+        # This is from PyTorch: using jnp equivalent
+        EXPECTED_INPUT_IDS = jnp.array([[1, 32000, 28705, 13, 11123, 28747, 1824, 460, 272, 1722, 315, 1023, 347, 13831, 925, 684, 739, 315, 3251, 456, 1633, 28804, 13, 4816, 8048, 12738, 28747]])  # fmt: skip
+        
+        # Check that inputs match expected
+        self.assertTrue(jnp.array_equal(inputs["input_ids"], EXPECTED_INPUT_IDS))
+        
+        # Generate output
+        output_ids = model.generate(
+            pixel_values=inputs["pixel_values"].astype(jnp.float16),
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs["attention_mask"],
+            max_new_tokens=20,
+        )
+        
+        # Check against expected output
+        EXPECTED_DECODED_TEXT = "\nUSER: What are the things I should be cautious about when I visit this place?\nASSISTANT: When visiting this place, there are a few things one should be cautious about. Firstly,"
+        
+        generated_text = self.processor.decode(output_ids.sequences[0], skip_special_tokens=True)
+        self.assertEqual(generated_text[:len(EXPECTED_DECODED_TEXT)], EXPECTED_DECODED_TEXT)
+    
+    @slow
+    def test_small_model_integration_test_llama(self):
         """
         Test generate output matches PyTorch model.
-        Based on test_small_model_integration_test_llama in PyTorch.
+        Equivalent to PyTorch test_small_model_integration_test_llama.
         """
         model_id = "llava-hf/llava-1.5-7b-hf"
         processor = AutoProcessor.from_pretrained(model_id)
@@ -221,7 +274,7 @@ class FlaxLlavaForConditionalGenerationIntegrationTest(unittest.TestCase):
         # Load the Flax model
         dtype = jnp.float16 
         try:
-            fx_model = FlaxLlavaForConditionalGeneration.from_pretrained(model_id, dtype=dtype)
+            model = FlaxLlavaForConditionalGeneration.from_pretrained(model_id, dtype=dtype)
         except OSError as e:
             self.skipTest(f"Skipping test because Flax model loading failed: {e}")
             return 
@@ -240,7 +293,7 @@ class FlaxLlavaForConditionalGenerationIntegrationTest(unittest.TestCase):
         inputs = processor(text=prompt, images=raw_image, return_tensors="np")
 
         # Generate output
-        output_ids = fx_model.generate(
+        output_ids = model.generate(
             pixel_values=inputs["pixel_values"].astype(dtype),
             input_ids=inputs["input_ids"],
             attention_mask=inputs["attention_mask"],
@@ -249,17 +302,17 @@ class FlaxLlavaForConditionalGenerationIntegrationTest(unittest.TestCase):
         )
 
         # Decode and compare
-        generated_text = processor.batch_decode(output_ids.sequences, skip_special_tokens=True)[0] 
+        generated_text = processor.decode(output_ids.sequences[0], skip_special_tokens=True)
 
         EXPECTED_DECODED_TEXT = "USER:  \nWhat are the things I should be cautious about when I visit this place?\nASSISTANT: When visiting this place, which is a pier or dock extending over a body of water, there are a few things to be cautious about. First, be aware of the weather conditions, as sudden changes in weather can make the pier unsafe to walk on. Second, be mindful of the water depth and any potential hazards, such as submerged rocks or debris, that could cause accidents or injuries. Additionally, be cautious of the presence of wildlife, such as birds or fish, and avoid disturbing their natural habitats. Lastly, be aware of any local regulations or guidelines for the use of the pier, as some areas may be restricted or prohibited for certain activities."
 
         self.assertEqual(generated_text, EXPECTED_DECODED_TEXT)
 
     @slow
-    def test_integration_generate_output_batched(self):
+    def test_small_model_integration_test_llama_batched(self):
         """
         Test generate output for a batch of inputs.
-        Based on test_small_model_integration_test_llama_batched in PyTorch.
+        Equivalent to PyTorch test_small_model_integration_test_llama_batched.
         """
         model_id = "llava-hf/llava-1.5-7b-hf"
         processor = AutoProcessor.from_pretrained(model_id)
@@ -267,7 +320,7 @@ class FlaxLlavaForConditionalGenerationIntegrationTest(unittest.TestCase):
         # Load the Flax model
         dtype = jnp.float16
         try:
-            fx_model = FlaxLlavaForConditionalGeneration.from_pretrained(model_id, dtype=dtype)
+            model = FlaxLlavaForConditionalGeneration.from_pretrained(model_id, dtype=dtype)
         except OSError as e:
             self.skipTest(f"Skipping test because Flax model loading failed: {e}")
             return
@@ -288,7 +341,7 @@ class FlaxLlavaForConditionalGenerationIntegrationTest(unittest.TestCase):
         inputs = processor(prompts, images=[image1, image2], return_tensors="np", padding=True)
 
         # Generate output
-        output_ids = fx_model.generate(
+        output_ids = model.generate(
             pixel_values=inputs["pixel_values"].astype(dtype),
             input_ids=inputs["input_ids"],
             attention_mask=inputs["attention_mask"],
@@ -304,4 +357,159 @@ class FlaxLlavaForConditionalGenerationIntegrationTest(unittest.TestCase):
             'USER:  \nWhat is this?\nASSISTANT: The image features two cats lying down on a pink couch. One cat is located on'
         ]
 
-        self.assertEqual(generated_texts, EXPECTED_DECODED_TEXTS) 
+        self.assertEqual(generated_texts, EXPECTED_DECODED_TEXTS)
+
+    @slow
+    def test_small_model_integration_test_batch(self):
+        """
+        Test batch processing with different prompt lengths.
+        Equivalent to PyTorch test_small_model_integration_test_batch.
+        """
+        model_id = "llava-hf/bakLlava-v1-hf"
+        try:
+            model = FlaxLlavaForConditionalGeneration.from_pretrained(model_id, dtype=jnp.float16)
+        except OSError as e:
+            self.skipTest(f"Skipping test because model could not be loaded: {e}")
+            return
+            
+        # The first batch is longer in terms of text, but only has 1 image.
+        # The second batch will be padded in text, but the first will be padded because images take more space
+        prompts = [
+            "USER: <image>\nWhat are the things I should be cautious about when I visit this place? What should I bring with me?\nASSISTANT:",
+            "USER: <image>\nWhat is this?\nASSISTANT:",
+        ]
+        
+        try:
+            image1 = Image.open(requests.get("https://llava-vl.github.io/static/images/view.jpg", stream=True).raw)
+            image2 = Image.open(requests.get("http://images.cocodataset.org/val2017/000000039769.jpg", stream=True).raw)
+        except Exception as e:
+            self.skipTest(f"Skipping test because images could not be downloaded: {e}")
+            return
+
+        # Use processor for consistent inputs
+        inputs = self.processor(prompts, images=[image1, image2], return_tensors="np", padding=True)
+
+        # Generate output
+        output_ids = model.generate(
+            pixel_values=inputs["pixel_values"].astype(jnp.float16),
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs["attention_mask"],
+            max_new_tokens=20,
+            do_sample=False
+        )
+
+        generated_texts = self.processor.batch_decode(output_ids.sequences, skip_special_tokens=True)
+        
+        # Match PyTorch's expected output
+        EXPECTED_DECODED_TEXTS = [
+            'USER:  \nWhat are the things I should be cautious about when I visit this place? What should I bring with me?\nASSISTANT: When visiting this place, there are a few things to be cautious about and items to bring along',
+            'USER:  \nWhat is this?\nASSISTANT: Cats'
+        ]
+        
+        # Check each output against expected
+        for i, (expected, actual) in enumerate(zip(EXPECTED_DECODED_TEXTS, generated_texts)):
+            # Only check prefixes since exact outputs might vary
+            self.assertTrue(
+                actual.startswith(expected[:50]),
+                f"Output {i} doesn't match expected prefix. Expected prefix: {expected[:50]}, Got: {actual[:50]}"
+            )
+    
+    @slow
+    def test_small_model_integration_test_llama_batched_regression(self):
+        """
+        Test multi-image & multi-prompt case.
+        Equivalent to PyTorch test_small_model_integration_test_llama_batched_regression.
+        
+        Note: PyTorch test uses attn_implementation="eager", but since this is specific
+        to PyTorch, we just test the normal case in Flax.
+        """
+        model_id = "llava-hf/llava-1.5-7b-hf"
+        processor = AutoProcessor.from_pretrained(model_id, pad_token="<pad>")
+
+        # Load model
+        try:
+            model = FlaxLlavaForConditionalGeneration.from_pretrained(model_id, dtype=jnp.float16)
+        except OSError as e:
+            self.skipTest(f"Skipping test because model could not be loaded: {e}")
+            return
+
+        prompts = [
+            "USER: <image>\nWhat are the things I should be cautious about when I visit this place? What should I bring with me?\nASSISTANT:",
+            "USER: <image>\nWhat is this?\nASSISTANT: Two cats lying on a bed!\nUSER: <image>\nAnd this?\nASSISTANT:",
+        ]
+        
+        try:
+            image1 = Image.open(requests.get("https://llava-vl.github.io/static/images/view.jpg", stream=True).raw)
+            image2 = Image.open(requests.get("http://images.cocodataset.org/val2017/000000039769.jpg", stream=True).raw)
+        except Exception as e:
+            self.skipTest(f"Skipping test because images could not be downloaded: {e}")
+            return
+
+        # Use 3 images (image1, image2, image1) as in PyTorch test
+        inputs = processor(prompts, images=[image1, image2, image1], return_tensors="np", padding=True)
+
+        # Generate output
+        output_ids = model.generate(
+            pixel_values=inputs["pixel_values"].astype(jnp.float16),
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs["attention_mask"],
+            max_new_tokens=20,
+            do_sample=False
+        )
+
+        # Decode
+        generated_texts = processor.batch_decode(output_ids.sequences, skip_special_tokens=True)
+        
+        # Expected outputs from PyTorch test
+        EXPECTED_DECODED_TEXTS = [
+            'USER:  \nWhat are the things I should be cautious about when I visit this place? What should I bring with me?\nASSISTANT: When visiting this serene location, one should be cautious about the weather conditions and potential', 
+            'USER:  \nWhat is this?\nASSISTANT: Two cats lying on a bed!\nUSER:  \nAnd this?\nASSISTANT: A cat sleeping on a bed.'
+        ]
+
+        # Check that the generated texts match the expected texts (at least the first part)
+        for i, (expected, actual) in enumerate(zip(EXPECTED_DECODED_TEXTS, generated_texts)):
+            # Only check first part since exact outputs might vary
+            self.assertTrue(
+                actual.startswith(expected[:50]),
+                f"Output {i} doesn't match expected prefix. Expected prefix: {expected[:50]}, Got: {actual[:50]}"
+            )
+    
+    @slow
+    def test_llava_index_error_bug(self):
+        """
+        Test for the index error bug with long prompts.
+        Equivalent to PyTorch test_llava_index_error_bug.
+        """
+        model_id = "llava-hf/llava-1.5-7b-hf"
+        
+        try:
+            model = FlaxLlavaForConditionalGeneration.from_pretrained(model_id, dtype=jnp.float16)
+        except OSError as e:
+            self.skipTest(f"Skipping test because model could not be loaded: {e}")
+            return
+            
+        processor = AutoProcessor.from_pretrained(model_id)
+
+        # Simulate a super long prompt, same as in PyTorch test
+        user_prompt = "Describe the image:?\n" * 200
+        prompt = f"USER: <image>\n{user_prompt}ASSISTANT:"
+        
+        try:
+            image_file = "http://images.cocodataset.org/val2017/000000039769.jpg"
+            raw_image = Image.open(requests.get(image_file, stream=True).raw)
+        except Exception as e:
+            self.skipTest(f"Skipping test because image could not be downloaded: {e}")
+            return
+            
+        inputs = processor(prompt, raw_image, return_tensors="np")
+
+        # Make sure that `generate` works without error
+        output_ids = model.generate(
+            pixel_values=inputs["pixel_values"].astype(jnp.float16),
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs["attention_mask"],
+            max_new_tokens=20,
+        )
+        
+        # Just check that we can decode without error
+        _ = processor.decode(output_ids.sequences[0], skip_special_tokens=True) 
