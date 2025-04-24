@@ -35,8 +35,7 @@ else:
 
     if is_flax_available():
         _import_structure["modeling_flax_mistral3"] = [
-            "FlaxMistral3ForCausalLM",
-            "FlaxMistral3Model",
+            "FlaxMistral3ForConditionalGeneration",
         ]
 
     sys.modules[__name__] = _LazyModule(__name__, _file, _import_structure, module_spec=__spec__)

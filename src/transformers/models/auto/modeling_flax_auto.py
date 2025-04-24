@@ -49,7 +49,7 @@ FLAX_MODEL_MAPPING_NAMES = OrderedDict(
         ("marian", "FlaxMarianModel"),
         ("mbart", "FlaxMBartModel"),
         ("mistral", "FlaxMistralModel"),
-        ("mistral3", "FlaxMistral3Model"),
+        ("mistral3", "FlaxMistral3ForConditionalGeneration"),
         ("mt5", "FlaxMT5Model"),
         ("opt", "FlaxOPTModel"),
         ("pegasus", "FlaxPegasusModel"),
@@ -136,6 +136,7 @@ FLAX_MODEL_FOR_IMAGE_CLASSIFICATION_MAPPING_NAMES = OrderedDict(
 FLAX_MODEL_FOR_VISION_2_SEQ_MAPPING_NAMES = OrderedDict(
     [
         ("vision-encoder-decoder", "FlaxVisionEncoderDecoderModel"),
+        ("mistral3", "FlaxMistral3ForConditionalGeneration"),
     ]
 )
 
@@ -154,7 +155,6 @@ FLAX_MODEL_FOR_CAUSAL_LM_MAPPING_NAMES = OrderedDict(
         ("gptj", "FlaxGPTJForCausalLM"),
         ("llama", "FlaxLlamaForCausalLM"),
         ("mistral", "FlaxMistralForCausalLM"),
-        ("mistral3", "FlaxMistral3ForCausalLM"),
         ("opt", "FlaxOPTForCausalLM"),
         ("roberta", "FlaxRobertaForCausalLM"),
         ("roberta-prelayernorm", "FlaxRobertaPreLayerNormForCausalLM"),
